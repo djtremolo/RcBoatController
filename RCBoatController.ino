@@ -1,88 +1,164 @@
-#include <SoftTimer.h>
-#include <SoftPwmTask.h>
-#include <BlinkTask.h>
-
-
-SoftPwmTask pwm0(A0);
-SoftPwmTask pwm1(A1);
-SoftPwmTask pwm2(A2);
-SoftPwmTask pwm3(A3);
-
-BlinkTask heartbeat(LED_BUILTIN, 200, 100, 2, 2000);
-
+#include "Arduino.h"
+#include <stdint.h>
 #define PIN_CH1     2
 #define PIN_CH2     3
-
-
-// -- Define method signature.
-void turnOn(Task* me);
-void turnOff(Task* me);
-void toggle(Task* me);
-void cb(Task* me);
-
-// -- taskOn will be launched on every 2 seconds.
-Task taskOn(50, turnOn);
-// -- taskOff will be launched on every 1111 milliseconds.
-Task taskOff(1111, turnOff);
-
-Task taskToggle(1000, toggle);
-Task taskCb(10, cb);
-
-
 
 typedef struct 
 {
   bool signalOk;
   bool risingEdgeSeen;
   bool fallingEdgeSeen;
-  bool rising;
-  uint32_t ts;
   uint32_t prevRisingTs;
   uint32_t prevFallingTs;
   uint32_t cycleWidth;
   uint32_t pulseWidth;
-  uint16_t valueInPercent;
 } rcContext_t;
 
+typedef struct
+{
+  bool enable;
+  int16_t value;
+} motor_t;
+
 rcContext_t rcContext[2];
+motor_t motor[2];
 
 void rcContextInitialize(rcContext_t* c)
 {
   memset(c, 0, sizeof(rcContext_t));
 }
 
+void motorInitialize(motor_t* m)
+{
+  memset(m, 0, sizeof(motor_t));
+}
+
 void ch1Pulse();
 void ch2Pulse();
 
 
-void setup() {
-  // -- Mark pin 13 as an output pin.
-  //pinMode(13, OUTPUT);
+uint32_t pulseCounter = 0;
+uint32_t timerCounter = 0;
 
-  pinMode(PIN_CH1, INPUT);
-  pinMode(PIN_CH2, INPUT);
 
-  Serial.begin(115200);
+uint8_t pwmOutputValues[4] = {0};
+#define M1_FWD  0
+#define M1_REV  1
+#define M2_FWD  2
+#define M2_REV  3
 
-  // -- Register the tasks to the timer manager. Both tasks will start immediately.
-  SoftTimer.add(&taskOn);
-  SoftTimer.add(&taskOff);
-  SoftTimer.add(&taskToggle);
-  SoftTimer.add(&taskCb);
+int pwmOutputPins[4] = {A0, A1, A2, A3};
 
-  SoftTimer.add(&pwm0);
-  SoftTimer.add(&pwm1);
-  SoftTimer.add(&pwm2);
-  SoftTimer.add(&pwm3);
+bool pwmEnable = false;
 
-  heartbeat.start();
 
-  rcContextInitialize(&(rcContext[0]));
-  rcContextInitialize(&(rcContext[1]));
+void motorOutputUpdateByIndex(int idx)
+{
+  if(idx < 2)
+  {
+    motor_t *m = &(motor[idx]);
+    const int fwdPin = (idx == 0 ? M1_FWD : M2_FWD);
+    const int revPin = (idx == 0 ? M1_REV : M2_REV);
 
-  attachInterrupt(digitalPinToInterrupt(PIN_CH1), ch1Pulse, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(PIN_CH2), ch2Pulse, CHANGE);
+    if(m->enable)
+    {
+      if(m->value > 0)
+      {
+        /*clear backward output*/
+        pwmOutputValues[revPin] = 0;
+        pwmOutputValues[fwdPin] = m->value;
+      }
+      else if(m->value < 0)
+      {
+        /*clear backward output*/
+        pwmOutputValues[fwdPin] = 0;
+        pwmOutputValues[revPin] = -1 * m->value;
+      }
+    }
+  }
 }
+
+void motorOutputUpdate()
+{
+  motorOutputUpdateByIndex(0);
+  motorOutputUpdateByIndex(1);
+}
+
+
+void motorValueSet(int idx, int16_t valueInPercent)
+{
+  if(idx < 2)
+  {
+    motor_t *m = &(motor[idx]);
+    m->value = map(valueInPercent, -100, 100, -128, 128);
+  }
+}
+
+void motorEnable(int idx, bool enable)
+{
+  if(idx < 2)
+  {
+    motor_t *m = &(motor[idx]);
+    m->enable = enable;
+  }
+}
+
+
+ISR(TIMER2_COMPA_vect)
+{
+  /*8kHz interval*/
+  static uint32_t tickCounter = 0;
+  static uint8_t values[4];
+  int i;
+
+  timerCounter++;
+
+  if(pwmEnable)
+  {
+    if(tickCounter == 0)
+    {
+      /*capture new values*/
+      for(i=0; i<4; i++)
+      {
+        values[i] = pwmOutputValues[i];
+      }
+
+      for(i=0; i<4; i++)
+      {
+        digitalWrite(pwmOutputPins[i], ((values[i] != 0) ? HIGH : LOW));
+      }
+    }
+    else
+    {
+      for(i=0; i<4; i++)
+      {
+        if(values[i] > 0)
+        {
+          values[i]--;
+
+          /*check if it changed from one to zero*/
+          if(values[i] == 0)
+          {
+            /*clear output*/
+            digitalWrite(pwmOutputPins[i], LOW);
+          }
+        }
+
+      }
+    }
+  }
+  else
+  {
+    /*not enabled, clear all*/
+      for(i=0; i<4; i++)
+      {
+        digitalWrite(pwmOutputPins[i], LOW);
+      }
+  }
+
+  tickCounter = (tickCounter+1) % 128;
+}
+
 
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
@@ -94,19 +170,17 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
   return false;
 }
 
-uint32_t pulseCounter = 0;
-
 
 void incomingPulse(rcContext_t* c, int pin)
 {
   uint32_t ts = micros();
-  c->rising = digitalRead(pin) == HIGH;
+  bool rising = digitalRead(pin) == HIGH;
 
   pulseCounter++;
 
-  if(c->rising)
+  if(rising)
   {
-    if(c->signalOk)
+    if(c->risingEdgeSeen && c->fallingEdgeSeen)
     {
       /*calculate cycle width*/
       c->cycleWidth = ts - c->prevRisingTs;
@@ -118,16 +192,10 @@ void incomingPulse(rcContext_t* c, int pin)
   }
   else
   {
-    if(c->signalOk)
+    if(c->risingEdgeSeen && c->fallingEdgeSeen)
     {
       /*calculate pulse width*/
       c->pulseWidth = ts - c->prevRisingTs;
-
-      if(c->cycleWidth != 0)
-      {
-        /*calculate value in percent*/
-        c->valueInPercent = ((100 * c->pulseWidth) / c->cycleWidth);
-      }
     }
 
     /*remember context information*/
@@ -137,27 +205,23 @@ void incomingPulse(rcContext_t* c, int pin)
 
   /*allow measurement only when both edge timestamps have been captured and widths are accepted*/
   if(c->risingEdgeSeen 
-      && c->fallingEdgeSeen 
-//      && checkRange(c->cycleWidth, 15000, 18000)
-//      && checkRange(c->pulseWidth, 0, c->cycleWidth)
+    && c->fallingEdgeSeen 
+    && checkRange(c->cycleWidth, 15000, 18000)
+    && checkRange(c->pulseWidth, 0, c->cycleWidth)
     )
+  {
+    /*everything looks good*/
+    c->signalOk = true;
+  }
+  else
+  {
+    if(c->signalOk)
     {
-      /*everything looks good*/
-      c->signalOk = true;
+      /*the receiver still thinks signal is OK but it is not -> reset state*/
+      rcContextInitialize(c);
     }
-    else
-    {
-      if(c->signalOk)
-      {
-        /*the receiver still thinks signal is OK but it is not -> reset state*/
-        rcContextInitialize(c);
-      }
-    }
+  }
 }
-
-
-
-
 
 void ch1Pulse()
 {
@@ -167,7 +231,6 @@ void ch2Pulse()
 {
   incomingPulse(&(rcContext[1]), PIN_CH2);
 }
-
 
 bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
 {
@@ -210,12 +273,10 @@ bool getSteeringDirection(int16_t *directionPercent)
 }
 
 
-/**
- * Turn ON Arduino's LED on pin 13.
- */
-void turnOn(Task* me) {
-  //digitalWrite(13, HIGH);
 
+void loop()
+{
+#if 0
   uint32_t pw, cw;
   int16_t dir;
 
@@ -228,75 +289,95 @@ void turnOn(Task* me) {
     Serial.print(0);
   }
 
-Serial.print("\t");
+  Serial.print("\t");
 
   if(getData(0, &pw, &cw))
   {
-    Serial.println(pw);
+    Serial.print(pw);
+    Serial.print("\t");
+    Serial.println(cw);
   }
   else
   {
-    Serial.println(0);
+    Serial.println("0\t0");
+  }
+#endif
+
+  static int16_t val = 0;
+  int16_t dir=0;
+
+  Serial.println(val);
+
+  val = (val+1) % 200;
+
+//  motorValueSet(0, val-100);
+  if(getSteeringDirection(&dir))
+  {
+    motorValueSet(0, dir);
   }
 
-/*
-  Serial.print(". Counter= ");
-  Serial.println(pulseCounter);
-*/
-/*
-  Serial.print("D2=");
-  Serial.println(digitalRead(2));
-*/
-
-}
-
-/**
- * Turn OFF Arduino's LED on pin 13.
- */
-void turnOff(Task* me) {
-  //digitalWrite(13, LOW);
-  //Serial.println("turnOff");
-}
-
-void toggle(Task* me) {
-  static bool on = false;
-  //digitalWrite(13, (on?HIGH:LOW));
-
-  on = !on;
-
-  //Serial.println("toggle");
+  motorOutputUpdate();
   
+  delay(100);
+
 }
 
 
-void cb(Task* me) {
-  //static bool on = false;
-  //digitalWrite(13, (on?HIGH:LOW));
-  static int a=0;
-  static int b=128;
-  static int c=64;
-  static int d=255-64;
-
-  static int cntr = 0;
 
 
-  pwm0.analogWrite(a);
-  pwm1.analogWrite(b);
-  pwm2.analogWrite(c);
-  pwm3.analogWrite(d);
+
+void setup()
+{
+  int i;
+  // -- Mark pin 13 as an output pin.
+  //pinMode(13, OUTPUT);
+
+  pinMode(PIN_CH1, INPUT);
+  pinMode(PIN_CH2, INPUT);
+  pinMode(13, OUTPUT);
+
+  for(i=0; i<4; i++)
+  {    
+    pinMode(pwmOutputPins[i], OUTPUT);
+    digitalWrite(pwmOutputPins[i], LOW);
+  }
 
 
-  if(cntr == 0)
-  {
-    a = (a+1) % 256;
-    b = (b+1) % 256;
-    c = (c+1) % 256;
-    d = (d+1) % 256;
-  }  
+  Serial.begin(115200);
 
-  cntr = (cntr+1) % 50;
+  rcContextInitialize(&(rcContext[0]));
+  rcContextInitialize(&(rcContext[1]));
 
-  //Serial.print("cb=");
-  //Serial.println(a);
-  
+  motorInitialize(&(motor[0]));
+  motorInitialize(&(motor[1]));
+
+  cli();  /*disable*/
+
+  attachInterrupt(digitalPinToInterrupt(PIN_CH1), ch1Pulse, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_CH2), ch2Pulse, CHANGE);
+
+
+  //set timer2 interrupt at 8kHz
+  TCCR2A = 0;// set entire TCCR2A register to 0
+  TCCR2B = 0;// same for TCCR2B
+  TCNT2  = 0;//initialize counter value to 0
+  // set compare match register for 8khz increments
+  OCR2A = 249;// = (16*10^6) / (8000*8) - 1 (must be <256)
+  // turn on CTC mode
+  TCCR2A |= (1 << WGM21);
+  // Set CS21 bit for 8 prescaler
+  TCCR2B |= (1 << CS21);   
+  // enable timer compare interrupt
+  TIMSK2 |= (1 << OCIE2A);
+
+  sei();  /*enable*/
+
+  motorValueSet(0, 0);
+  motorValueSet(1, 0);
+
+  motorEnable(0, true);
+  motorEnable(1, true);
+
+
+  pwmEnable = true;
 }
