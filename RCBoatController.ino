@@ -306,19 +306,24 @@ void loop()
   static int16_t val = 0;
   int16_t dir=0;
 
-  Serial.println(val);
 
-  val = (val+1) % 200;
+  val = (val+1) % 11;
 
+  #if 0
 //  motorValueSet(0, val-100);
   if(getSteeringDirection(&dir))
   {
     motorValueSet(0, dir);
   }
+  #endif
+
+  Serial.println(val*10);
+  motorValueSet(0, val*10);
+  motorValueSet(1, -1*(val*10));
 
   motorOutputUpdate();
   
-  delay(100);
+  delay(1000);
 
 }
 
@@ -357,18 +362,21 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(PIN_CH2), ch2Pulse, CHANGE);
 
 
-  //set timer2 interrupt at 8kHz
+  //set timer2 interrupt at 16kHz
   TCCR2A = 0;// set entire TCCR2A register to 0
   TCCR2B = 0;// same for TCCR2B
   TCNT2  = 0;//initialize counter value to 0
-  // set compare match register for 8khz increments
-  OCR2A = 249;// = (16*10^6) / (8000*8) - 1 (must be <256)
+  // set compare match register for 16khz increments (with no prescaler)
+  OCR2A = 124;// = (16*10^6) / (8000*16) - 1 (must be <256)
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
-  // Set CS21 bit for 8 prescaler
-  TCCR2B |= (1 << CS21);   
+  //Set CS21 bit for 8 prescaler
+  TCCR2B |= (1 << CS21);
   // enable timer compare interrupt
   TIMSK2 |= (1 << OCIE2A);
+
+
+  /*the ISR will be called at 16kHz interval -> 128 pwm steps -> 8ms per cycle*/
 
   sei();  /*enable*/
 
