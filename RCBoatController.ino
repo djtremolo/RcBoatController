@@ -14,10 +14,32 @@ typedef struct
   uint32_t pulseWidth;
 } rcContext_t;
 
+typedef enum
+{
+  MOTOR_COAST,
+  MOTOR_FORWARD,
+  MOTOR_REVERSE,
+  MOTOR_BRAKE
+} motorDrive_t;
+
+
+typedef struct 
+{
+  uint8_t width;  /*0...127*/
+
+  /*the channels A&B are driven as a pair: typically the active duty cycle is either fwd/rev and the rest is braking*/
+  uint8_t activeDutyValue[2]; 
+  uint8_t passiveDutyValue[2];
+} pwmChannelPair_t;
+
+
+
 typedef struct
 {
   bool enable;
-  int16_t value;
+  int16_t value;    /*free to be written at any time*/
+  int16_t pwmValue; /*copied from value at update()*/
+  motorDrive_t drive;
 } motor_t;
 
 rcContext_t rcContext[2];
@@ -33,15 +55,16 @@ void motorInitialize(motor_t* m)
   memset(m, 0, sizeof(motor_t));
 }
 
+void getMotorPwmValues(pwmChannelPair_t* chPair);
+
+
 void ch1Pulse();
 void ch2Pulse();
 
 
-uint32_t pulseCounter = 0;
+uint32_t pulseCounter[2] = {0};
 uint32_t timerCounter = 0;
 
-
-uint8_t pwmOutputValues[4] = {0};
 #define M1_FWD  0
 #define M1_REV  1
 #define M2_FWD  2
@@ -52,36 +75,25 @@ int pwmOutputPins[4] = {A0, A1, A2, A3};
 bool pwmEnable = false;
 
 
-void motorOutputUpdateByIndex(int idx)
+void motorOutputUpdate()
 {
-  if(idx < 2)
+  int idx;
+
+  for(idx = 0; idx < 2; idx++)
   {
     motor_t *m = &(motor[idx]);
-    const int fwdPin = (idx == 0 ? M1_FWD : M2_FWD);
-    const int revPin = (idx == 0 ? M1_REV : M2_REV);
 
     if(m->enable)
     {
-      if(m->value > 0)
-      {
-        /*clear backward output*/
-        pwmOutputValues[revPin] = 0;
-        pwmOutputValues[fwdPin] = m->value;
-      }
-      else if(m->value < 0)
-      {
-        /*clear backward output*/
-        pwmOutputValues[fwdPin] = 0;
-        pwmOutputValues[revPin] = -1 * m->value;
-      }
+      m->drive = ((m->value < 0) ? MOTOR_REVERSE : MOTOR_FORWARD);
+      m->pwmValue = m->value;
+    }
+    else
+    {
+      m->drive = MOTOR_COAST;
+      m->pwmValue = 128;  /*full cycle*/
     }
   }
-}
-
-void motorOutputUpdate()
-{
-  motorOutputUpdateByIndex(0);
-  motorOutputUpdateByIndex(1);
 }
 
 
@@ -104,56 +116,148 @@ void motorEnable(int idx, bool enable)
 }
 
 
+void monitorRcReceiverStatus()
+{
+  static uint32_t prevTs = 0;
+  static uint32_t prevRcCounter = 0;
+  uint32_t ts = millis();
+  uint32_t age = ts-prevTs;
+
+  if(age > 50) /*normal cycle is 50ms*/
+  {
+    static uint32_t prevCounters[2] = {0};
+
+    if((pulseCounter[0] == prevCounters[0]))
+    {
+      Serial.println("ERROR: Ch1 receiver pulse not detected");
+      rcContextInitialize(&rcContext[0]);
+      pwmEnable = false;
+    }
+
+    if((pulseCounter[1] == prevCounters[1]))
+    {
+      Serial.println("ERROR: Ch2 receiver pulse not detected");
+      rcContextInitialize(&rcContext[1]);
+      pwmEnable = false;
+    }
+
+    prevCounters[0] = pulseCounter[0];
+    prevCounters[1] = pulseCounter[1];
+
+    prevTs = ts;
+  }
+}
+
+
+void getMotorPwmValues(pwmChannelPair_t* chPair)
+{
+  int i;
+  for(i = 0; i < 2; i++)
+  {
+    motor_t *m = &(motor[i]);
+    pwmChannelPair_t *cp = &(chPair[i]);
+
+    cp->width = m->pwmValue;
+    switch(m->drive)
+    {
+      case MOTOR_FORWARD:
+        /*active part: drive*/
+        cp->activeDutyValue[0] = HIGH;
+        cp->activeDutyValue[1] = LOW;
+
+        /*rest: brake*/
+        cp->passiveDutyValue[0] = HIGH;
+        cp->passiveDutyValue[1] = HIGH;
+        break;
+
+      case MOTOR_REVERSE:
+        /*active part: drive*/
+        cp->activeDutyValue[0] = LOW;
+        cp->activeDutyValue[1] = HIGH;
+
+        /*rest: brake*/
+        cp->passiveDutyValue[0] = HIGH;
+        cp->passiveDutyValue[1] = HIGH;
+        break;
+
+      case MOTOR_BRAKE:
+        /*active part: brake*/
+        cp->activeDutyValue[0] = HIGH;
+        cp->activeDutyValue[1] = HIGH;
+
+        /*rest: coast*/
+        cp->passiveDutyValue[0] = HIGH;
+        cp->passiveDutyValue[1] = HIGH;
+        break;
+
+      default:
+        /*active part: coast*/
+        cp->activeDutyValue[0] = LOW;
+        cp->activeDutyValue[1] = LOW;
+
+        /*rest: coast*/
+        cp->passiveDutyValue[0] = LOW;
+        cp->passiveDutyValue[1] = LOW;
+        break;
+    }
+  }
+}
+
 ISR(TIMER2_COMPA_vect)
 {
-  /*8kHz interval*/
   static uint32_t tickCounter = 0;
-  static uint8_t values[4];
+  static pwmChannelPair_t chPair[2];
   int i;
 
   timerCounter++;
 
-  if(pwmEnable)
+  /////////////////////if(pwmEnable)
+  if(1)
   {
     if(tickCounter == 0)
     {
       /*capture new values*/
-      for(i=0; i<4; i++)
-      {
-        values[i] = pwmOutputValues[i];
-      }
+      getMotorPwmValues(chPair);
 
-      for(i=0; i<4; i++)
+      for(i=0; i<2; i++)
       {
-        digitalWrite(pwmOutputPins[i], ((values[i] != 0) ? HIGH : LOW));
+        const int pinIdx = i*2;
+        pwmChannelPair_t *cp = &(chPair[i]);
+
+        digitalWrite(pwmOutputPins[pinIdx], cp->activeDutyValue[0]);
+        digitalWrite(pwmOutputPins[pinIdx+1], cp->activeDutyValue[1]);
       }
     }
     else
     {
-      for(i=0; i<4; i++)
+      for(i=0; i<2; i++)
       {
-        if(values[i] > 0)
+        pwmChannelPair_t *cp = &(chPair[i]);
+
+        if(cp->width > 0)
         {
-          values[i]--;
+          cp->width--;
 
           /*check if it changed from one to zero*/
-          if(values[i] == 0)
+          if(cp->width == 0)
           {
             /*clear output*/
-            digitalWrite(pwmOutputPins[i], LOW);
+            const int pinIdx = i*2;
+
+            digitalWrite(pwmOutputPins[pinIdx], cp->passiveDutyValue[0]);
+            digitalWrite(pwmOutputPins[pinIdx+1], cp->passiveDutyValue[1]);
           }
         }
-
       }
     }
   }
   else
   {
     /*not enabled, clear all*/
-      for(i=0; i<4; i++)
-      {
-        digitalWrite(pwmOutputPins[i], LOW);
-      }
+    for(i=0; i<4; i++)
+    {
+      digitalWrite(pwmOutputPins[i], LOW);
+    }
   }
 
   tickCounter = (tickCounter+1) % 128;
@@ -175,8 +279,6 @@ void incomingPulse(rcContext_t* c, int pin)
 {
   uint32_t ts = micros();
   bool rising = digitalRead(pin) == HIGH;
-
-  pulseCounter++;
 
   if(rising)
   {
@@ -212,6 +314,7 @@ void incomingPulse(rcContext_t* c, int pin)
   {
     /*everything looks good*/
     c->signalOk = true;
+    pwmEnable = true;
   }
   else
   {
@@ -226,10 +329,12 @@ void incomingPulse(rcContext_t* c, int pin)
 void ch1Pulse()
 {
   incomingPulse(&(rcContext[0]), PIN_CH1);
+  pulseCounter[0]++;
 }
 void ch2Pulse()
 {
   incomingPulse(&(rcContext[1]), PIN_CH2);
+  pulseCounter[1]++;
 }
 
 bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
@@ -270,6 +375,56 @@ bool getSteeringDirection(int16_t *directionPercent)
   }
 
   return ret;
+}
+
+bool getThrottlePosition(int16_t *throttlePosition)
+{
+  bool ret = false;
+  uint32_t pw, cw;
+
+  if(getData(1, &pw, &cw))
+  {
+    int32_t tp = (int32_t)map(pw, 1116, 2064, -100, 100);
+
+    if(abs(tp) < 5) tp = 0;
+    else if(tp > 100) tp = 100;
+    else if(tp < -100) tp = -100;
+
+    *throttlePosition = (int16_t)tp;
+
+    ret = true;
+  }
+
+  return ret;
+}
+
+
+bool speedControl()
+{
+  int16_t throttle;
+  int16_t direction;
+
+  if(getSteeringDirection(&direction))
+  {
+    if(getThrottlePosition(&throttle))
+    {
+      float leftMotor; 
+      float rightMotor;
+      float divider = ((float)abs(throttle)) / 10.0;
+      if(divider < 1.0) divider = 1.0;
+      float steeringStrength = 2.0 / divider; /*value will be in range of 200% ... 20% depending on throttle*/
+
+      float primaryMotorScale = 1.0;
+      float anotherMotorScale = (((float)abs(direction)) * steeringStrength) / 100.0;
+
+      if(throttle > 0)
+      {
+        /*forward*/
+      }
+    }
+  }
+
+
 }
 
 
@@ -325,6 +480,7 @@ void loop()
   
   delay(1000);
 
+  monitorRcReceiverStatus();
 }
 
 
