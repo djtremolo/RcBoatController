@@ -156,37 +156,74 @@ void monitorRcReceiverStatus()
   }
 }
 
+uint16_t tmpDriveRestValue = HIGH;
+bool tmpBoostEnabled = false;
+
+bool applyBoost(uint8_t *width, int *cntr)
+{
+  bool ret = false;
+
+  if(tmpBoostEnabled)
+  {
+    if(*cntr <= 5)
+    {
+      if(*width > 0)
+      {
+        ret = true;
+        *width = 128;
+      }
+      else if(*width < 0)
+      {
+        ret = true;
+        *width = -128;
+      }
+    }
+
+    *cntr = (*cntr +1) % 100;
+  }
+
+  return ret;
+}
 
 void getMotorPwmValues(pwmChannelPair_t* chPair)
 {
   int i;
   for(i = 0; i < 2; i++)
   {
+//    static int boostCntr[2] = {0};
     motor_t *m = &(motor[i]);
     pwmChannelPair_t *cp = &(chPair[i]);
-    uint8_t driveRestValue = (m->pwmValue < 50) ? LOW : HIGH; /*for less than 20, coast during PWM idle, otherwise brake*/
+    uint8_t driveRestValue = tmpDriveRestValue;  //(m->pwmValue < 50) ? LOW : HIGH; /*for less than 20, coast during PWM idle, otherwise brake*/
+
 
     cp->width = m->pwmValue;
     switch(m->drive)
     {
       case MOTOR_FORWARD:
-        /*active part: drive*/
-        cp->activeDutyValue[0] = HIGH;
-        cp->activeDutyValue[1] = LOW;
 
-        /*rest: brake*/
-        cp->passiveDutyValue[0] = driveRestValue;
-        cp->passiveDutyValue[1] = driveRestValue;
+//        if(!applyBoost(&(cp->width), &(boostCntr[i])))
+        {
+          /*active part: drive*/
+          cp->activeDutyValue[0] = HIGH;
+          cp->activeDutyValue[1] = LOW;
+
+          /*rest: brake*/
+          cp->passiveDutyValue[0] = driveRestValue;
+          cp->passiveDutyValue[1] = driveRestValue;
+        }
         break;
 
       case MOTOR_REVERSE:
-        /*active part: drive*/
-        cp->activeDutyValue[0] = LOW;
-        cp->activeDutyValue[1] = HIGH;
+//        if(!applyBoost(&(cp->width), &(boostCntr[i])))
+        {
+          /*active part: drive*/
+          cp->activeDutyValue[0] = LOW;
+          cp->activeDutyValue[1] = HIGH;
 
-        /*rest: brake*/
-        cp->passiveDutyValue[0] = driveRestValue;
-        cp->passiveDutyValue[1] = driveRestValue;
+          /*rest: brake*/
+          cp->passiveDutyValue[0] = driveRestValue;
+          cp->passiveDutyValue[1] = driveRestValue;
+        }
         break;
 
       case MOTOR_BRAKE:
@@ -212,11 +249,22 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
   }
 }
 
+#define PWM_DIVIDER     myDiv       //8
+
+uint8_t tmpDiv = 2;
+
+
 ISR(TIMER2_COMPA_vect)
 {
   static uint32_t tickCounter = 0;
+  static uint32_t tickCounterMax = 128 / tmpDiv;
   static pwmChannelPair_t chPair[2];
   int i;
+
+  static uint8_t myDiv = tmpDiv;
+
+  digitalWrite(4, HIGH);
+
 
   timerCounter++;
 
@@ -227,6 +275,9 @@ ISR(TIMER2_COMPA_vect)
     {
       /*capture new values*/
       getMotorPwmValues(chPair);
+
+      myDiv = tmpDiv;   /*POIS*/
+      tickCounterMax = 128 / myDiv;
 
       for(i=0; i<2; i++)
       {
@@ -245,7 +296,7 @@ ISR(TIMER2_COMPA_vect)
 
         if(cp->width > 0)
         {
-          cp->width--;
+          cp->width = (cp->width >= PWM_DIVIDER ? cp->width-PWM_DIVIDER : 0);
 
           /*check if it changed from one to zero*/
           if(cp->width == 0)
@@ -269,7 +320,9 @@ ISR(TIMER2_COMPA_vect)
     }
   }
 
-  tickCounter = (tickCounter+1) % 128;
+  tickCounter = (tickCounter+1) % tickCounterMax;
+
+  digitalWrite(4, LOW);
 }
 
 
@@ -287,6 +340,9 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 void incomingPulse(rcContext_t* c, int pin)
 {
   uint32_t ts = micros();
+
+  digitalWrite(5, HIGH);
+
   bool rising = digitalRead(pin) == HIGH;
 
   if(rising)
@@ -333,6 +389,9 @@ void incomingPulse(rcContext_t* c, int pin)
       rcContextInitialize(c);
     }
   }
+
+
+  digitalWrite(5, LOW);
 }
 
 void ch1Pulse()
@@ -467,7 +526,7 @@ void loop()
   }
 #endif
 
-  static int16_t val = 10;
+  static int16_t val = 0;
   int16_t dir=0;
 
 #if 0
@@ -494,12 +553,11 @@ void loop()
 //  val = 10;
   static bool up = true;
   static int16_t factor = 1;
-  Serial.println(val);
-  motorValueSet(0, val);
-  motorValueSet(1, val);
+  static bool rControl = false;
 
-  motorOutputUpdate();
 
+
+/*
   if(up)
   {
     val++;
@@ -512,18 +570,86 @@ void loop()
   else
   {
     val--;
-    if(val <= 2)
+    if(val <= 0)
     {
       up = true;
       factor = -1;
     }
   }
+*/
+
+  if (Serial.available() > 0) 
+  {
+    char ch = Serial.read();
+    if(ch>='0' && ch <='9')
+    {
+      val = (int16_t)(ch-'0')*10;
+    }
+    else if(ch=='-')
+    {
+      factor = -1;
+    }
+    else if(ch=='+')
+    {
+      factor = 1;
+    }
+    else if(ch=='*')
+    {
+      if(tmpDiv < 128) tmpDiv *= 2;
+    }
+    else if(ch=='/')
+    {
+      if(tmpDiv > 1) tmpDiv /= 2;
+    }
+    else if(ch=='r' || ch == 'R')
+    {
+      tmpDriveRestValue = (tmpDriveRestValue == HIGH ? LOW : HIGH);
+    }
+    else if(ch=='b' || ch == 'B')
+    {
+      tmpBoostEnabled = !tmpBoostEnabled;
+    }
+    else if(ch=='c' || ch == 'C')
+    {
+      rControl = !rControl;
+    }
+
+    Serial.print("swFreq=");
+    Serial.print(16000 / (128/tmpDiv));
+    Serial.print(", divider=");
+    Serial.print(tmpDiv);
+    Serial.print(", rest=");
+    Serial.print(tmpDriveRestValue == HIGH ? "Brake" : "Coast");
+    Serial.print(", boost=");
+    Serial.print(tmpBoostEnabled ? "True" : "False");
+    Serial.print(", rControl=");
+    Serial.println(rControl ? "True" : "False");
+  }
 
 
+  int16_t av;
+
+  if(rControl)
+  {
+    getSteeringDirection(&av);
+  }
+  else
+  {
+    av = factor * val;
+  }
+  
+  motorValueSet(0, av);
+  motorValueSet(1, av);
+
+  motorOutputUpdate();
+
+
+  Serial.print("val=");
+  Serial.println(av);
 
   delay(100);
 
- // monitorRcReceiverStatus();
+  //monitorRcReceiverStatus();
 }
 
 
@@ -539,6 +665,11 @@ void setup()
   pinMode(PIN_CH1, INPUT);
   pinMode(PIN_CH2, INPUT);
   pinMode(13, OUTPUT);
+
+
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+
 
   for(i=0; i<4; i++)
   {    
