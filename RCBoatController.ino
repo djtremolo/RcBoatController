@@ -71,6 +71,7 @@ uint32_t timerCounter = 0;
 #define M2_REV  3
 
 int pwmOutputPins[4] = {A0, A1, A2, A3};
+//PORTC: bit0 = A0 etc
 
 bool pwmEnable = false;
 
@@ -254,6 +255,60 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
 uint8_t tmpDiv = 2;
 
 
+
+#if 0
+inline void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1) __attribute__((always_inline));
+void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
+#else
+inline void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1) __attribute__((always_inline));
+void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
+#endif
+{
+  //will fail if idx >= 2!
+
+#if 0
+
+  uint8_t mask = 0;
+  const int shiftBits = idx*2;  /*this defines the bit pair in PORTC*/
+  const uint8_t clearMask = ~(0b11 << shiftBits);
+
+  if(val0 == HIGH) mask |= (0x1 << shiftBits);
+  if(val1 == HIGH) mask |= (0x2 << shiftBits);
+
+  uint8_t pcVal = PORTC;
+  pcVal &= clearMask;
+  pcVal |= mask;
+  PORTC = pcVal;
+
+#else
+  int pinIdx = idx*2;
+
+  if(val0 == HIGH) 
+  {
+    PORTC |= 0x01 << pinIdx;
+  }
+  else
+  {
+    PORTC &= ~(0x01 << pinIdx);
+  }
+
+  if(val1 == HIGH) 
+  {
+    PORTC |= 0x02 << pinIdx;
+  }
+  else
+  {
+    PORTC &= ~(0x02 << pinIdx);
+  }
+
+#endif
+
+
+
+}
+
+#define MYOPT true
+
 ISR(TIMER2_COMPA_vect)
 {
   static uint32_t tickCounter = 0;
@@ -264,7 +319,6 @@ ISR(TIMER2_COMPA_vect)
   static uint8_t myDiv = tmpDiv;
 
   digitalWrite(4, HIGH);
-
 
   timerCounter++;
 
@@ -284,8 +338,12 @@ ISR(TIMER2_COMPA_vect)
         const int pinIdx = i*2;
         pwmChannelPair_t *cp = &(chPair[i]);
 
-        digitalWrite(pwmOutputPins[pinIdx], cp->activeDutyValue[0]);
-        digitalWrite(pwmOutputPins[pinIdx+1], cp->activeDutyValue[1]);
+        #if MYOPT
+          setMotorPinsISR(i, cp->activeDutyValue[0], cp->activeDutyValue[1]);
+        #else
+          digitalWrite(pwmOutputPins[pinIdx], cp->activeDutyValue[0]);
+          digitalWrite(pwmOutputPins[pinIdx+1], cp->activeDutyValue[1]);
+        #endif
       }
     }
     else
@@ -304,8 +362,12 @@ ISR(TIMER2_COMPA_vect)
             /*clear output*/
             const int pinIdx = i*2;
 
-            digitalWrite(pwmOutputPins[pinIdx], cp->passiveDutyValue[0]);
-            digitalWrite(pwmOutputPins[pinIdx+1], cp->passiveDutyValue[1]);
+            #if MYOPT
+              setMotorPinsISR(i, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
+            #else
+              digitalWrite(pwmOutputPins[pinIdx], cp->passiveDutyValue[0]);
+              digitalWrite(pwmOutputPins[pinIdx+1], cp->passiveDutyValue[1]);
+            #endif
           }
         }
       }
@@ -314,15 +376,21 @@ ISR(TIMER2_COMPA_vect)
   else
   {
     /*not enabled, clear all*/
+    #if MYOPT
+      setMotorPinsISR(0, LOW, LOW);
+      setMotorPinsISR(1, LOW, LOW);
+    #else
     for(i=0; i<4; i++)
     {
       digitalWrite(pwmOutputPins[i], LOW);
     }
+    #endif
   }
 
   tickCounter = (tickCounter+1) % tickCounterMax;
 
   digitalWrite(4, LOW);
+
 }
 
 
@@ -615,7 +683,8 @@ void loop()
     }
 
     Serial.print("swFreq=");
-    Serial.print(16000 / (128/tmpDiv));
+//    Serial.print(16000 / (128/tmpDiv));
+    Serial.print(8000 / (128/tmpDiv));
     Serial.print(", divider=");
     Serial.print(tmpDiv);
     Serial.print(", rest=");
@@ -697,7 +766,7 @@ void setup()
   TCCR2B = 0;// same for TCCR2B
   TCNT2  = 0;//initialize counter value to 0
   // set compare match register for 16khz increments (with no prescaler)
-  OCR2A = 124;// = (16*10^6) / (8000*16) - 1 (must be <256)
+  OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
   //Set CS21 bit for 8 prescaler
