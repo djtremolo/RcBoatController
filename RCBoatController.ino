@@ -42,6 +42,12 @@ typedef struct
   motorDrive_t drive;
 } motor_t;
 
+#define ISR_DIVIDER   16   // MUST be power of 2! 
+constexpr int16_t pwmRangeMin = -1 * (256 / ISR_DIVIDER);
+constexpr int16_t pwmRangeMax = 256 / ISR_DIVIDER;
+
+
+
 rcContext_t rcContext[2];
 motor_t motor[2];
 
@@ -100,7 +106,7 @@ void motorOutputUpdate()
     else
     {
       m->drive = MOTOR_COAST;
-      m->pwmValue = 128;  /*full cycle*/
+      m->pwmValue = pwmRangeMax;  /*full cycle*/
     }
   }
 }
@@ -111,7 +117,7 @@ void motorValueSet(int idx, int16_t valueInPercent)
   if(idx < 2)
   {
     motor_t *m = &(motor[idx]);
-    m->value = map(valueInPercent, -100, 100, -128, 128);
+    m->value = map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
   }
 }
 
@@ -194,37 +200,29 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
 //    static int boostCntr[2] = {0};
     motor_t *m = &(motor[i]);
     pwmChannelPair_t *cp = &(chPair[i]);
-    uint8_t driveRestValue = tmpDriveRestValue;  //(m->pwmValue < 50) ? LOW : HIGH; /*for less than 20, coast during PWM idle, otherwise brake*/
-
 
     cp->width = m->pwmValue;
     switch(m->drive)
     {
       case MOTOR_FORWARD:
 
-//        if(!applyBoost(&(cp->width), &(boostCntr[i])))
-        {
-          /*active part: drive*/
-          cp->activeDutyValue[0] = HIGH;
-          cp->activeDutyValue[1] = LOW;
+        /*active part: drive*/
+        cp->activeDutyValue[0] = HIGH;
+        cp->activeDutyValue[1] = LOW;
 
-          /*rest: brake*/
-          cp->passiveDutyValue[0] = driveRestValue;
-          cp->passiveDutyValue[1] = driveRestValue;
-        }
+        /*rest: brake*/
+        cp->passiveDutyValue[0] = HIGH;
+        cp->passiveDutyValue[1] = HIGH;
         break;
 
       case MOTOR_REVERSE:
-//        if(!applyBoost(&(cp->width), &(boostCntr[i])))
-        {
-          /*active part: drive*/
-          cp->activeDutyValue[0] = LOW;
-          cp->activeDutyValue[1] = HIGH;
+        /*active part: drive*/
+        cp->activeDutyValue[0] = LOW;
+        cp->activeDutyValue[1] = HIGH;
 
-          /*rest: brake*/
-          cp->passiveDutyValue[0] = driveRestValue;
-          cp->passiveDutyValue[1] = driveRestValue;
-        }
+        /*rest: brake*/
+        cp->passiveDutyValue[0] = HIGH;
+        cp->passiveDutyValue[1] = HIGH;
         break;
 
       case MOTOR_BRAKE:
@@ -250,37 +248,11 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
   }
 }
 
-#define PWM_DIVIDER     myDiv       //8
-
-uint8_t tmpDiv = 2;
-
-
-
-#if 0
 inline void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1) __attribute__((always_inline));
 void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
-#else
-inline void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1) __attribute__((always_inline));
-void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
-#endif
 {
   //will fail if idx >= 2!
 
-#if 0
-
-  uint8_t mask = 0;
-  const int shiftBits = idx*2;  /*this defines the bit pair in PORTC*/
-  const uint8_t clearMask = ~(0b11 << shiftBits);
-
-  if(val0 == HIGH) mask |= (0x1 << shiftBits);
-  if(val1 == HIGH) mask |= (0x2 << shiftBits);
-
-  uint8_t pcVal = PORTC;
-  pcVal &= clearMask;
-  pcVal |= mask;
-  PORTC = pcVal;
-
-#else
   int pinIdx = idx*2;
 
   if(val0 == HIGH) 
@@ -300,23 +272,13 @@ void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
   {
     PORTC &= ~(0x02 << pinIdx);
   }
-
-#endif
-
-
-
 }
-
-#define MYOPT true
 
 ISR(TIMER2_COMPA_vect)
 {
-  static uint32_t tickCounter = 0;
-  static uint32_t tickCounterMax = 128 / tmpDiv;
+  static uint8_t tickCounter = 0;
   static pwmChannelPair_t chPair[2];
   int i;
-
-  static uint8_t myDiv = tmpDiv;
 
   digitalWrite(4, HIGH);
 
@@ -325,26 +287,13 @@ ISR(TIMER2_COMPA_vect)
   /////////////////////if(pwmEnable)
   if(1)
   {
-    if(tickCounter == 0)
+    if((tickCounter & (pwmRangeMax-1)) == 0)
     {
       /*capture new values*/
       getMotorPwmValues(chPair);
 
-      myDiv = tmpDiv;   /*POIS*/
-      tickCounterMax = 128 / myDiv;
-
-      for(i=0; i<2; i++)
-      {
-        const int pinIdx = i*2;
-        pwmChannelPair_t *cp = &(chPair[i]);
-
-        #if MYOPT
-          setMotorPinsISR(i, cp->activeDutyValue[0], cp->activeDutyValue[1]);
-        #else
-          digitalWrite(pwmOutputPins[pinIdx], cp->activeDutyValue[0]);
-          digitalWrite(pwmOutputPins[pinIdx+1], cp->activeDutyValue[1]);
-        #endif
-      }
+      setMotorPinsISR(0, chPair[0].activeDutyValue[0], chPair[0].activeDutyValue[1]);
+      setMotorPinsISR(1, chPair[1].activeDutyValue[0], chPair[1].activeDutyValue[1]);
     }
     else
     {
@@ -354,20 +303,13 @@ ISR(TIMER2_COMPA_vect)
 
         if(cp->width > 0)
         {
-          cp->width = (cp->width >= PWM_DIVIDER ? cp->width-PWM_DIVIDER : 0);
+          cp->width--;
 
           /*check if it changed from one to zero*/
           if(cp->width == 0)
           {
             /*clear output*/
-            const int pinIdx = i*2;
-
-            #if MYOPT
-              setMotorPinsISR(i, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
-            #else
-              digitalWrite(pwmOutputPins[pinIdx], cp->passiveDutyValue[0]);
-              digitalWrite(pwmOutputPins[pinIdx+1], cp->passiveDutyValue[1]);
-            #endif
+            setMotorPinsISR(i, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
           }
         }
       }
@@ -376,18 +318,11 @@ ISR(TIMER2_COMPA_vect)
   else
   {
     /*not enabled, clear all*/
-    #if MYOPT
-      setMotorPinsISR(0, LOW, LOW);
-      setMotorPinsISR(1, LOW, LOW);
-    #else
-    for(i=0; i<4; i++)
-    {
-      digitalWrite(pwmOutputPins[i], LOW);
-    }
-    #endif
+    setMotorPinsISR(0, LOW, LOW);
+    setMotorPinsISR(1, LOW, LOW);
   }
 
-  tickCounter = (tickCounter+1) % tickCounterMax;
+  tickCounter++;
 
   digitalWrite(4, LOW);
 
@@ -411,7 +346,7 @@ void incomingPulse(rcContext_t* c, int pin)
 
   digitalWrite(5, HIGH);
 
-  bool rising = digitalRead(pin) == HIGH;
+  bool rising = PORTD & (0x1 << pin);//digitalRead(pin) == HIGH;
 
   if(rising)
   {
@@ -594,7 +529,7 @@ void loop()
   }
 #endif
 
-  static int16_t val = 0;
+  static int16_t val = 10;
   int16_t dir=0;
 
 #if 0
@@ -645,6 +580,25 @@ void loop()
     }
   }
 */
+  int16_t av;
+
+  if(rControl)
+  {
+    getSteeringDirection(&av);
+  }
+  else
+  {
+    static uint8_t x=0;
+    av = map(x++, 0, 255, 10, 90);
+//    av = factor * val;
+  }
+  
+  motorValueSet(0, av);
+  motorValueSet(1, av);
+
+  motorOutputUpdate();
+
+  delay(100);
 
   if (Serial.available() > 0) 
   {
@@ -661,14 +615,6 @@ void loop()
     {
       factor = 1;
     }
-    else if(ch=='*')
-    {
-      if(tmpDiv < 128) tmpDiv *= 2;
-    }
-    else if(ch=='/')
-    {
-      if(tmpDiv > 1) tmpDiv /= 2;
-    }
     else if(ch=='r' || ch == 'R')
     {
       tmpDriveRestValue = (tmpDriveRestValue == HIGH ? LOW : HIGH);
@@ -682,41 +628,20 @@ void loop()
       rControl = !rControl;
     }
 
+
+
     Serial.print("swFreq=");
-//    Serial.print(16000 / (128/tmpDiv));
-    Serial.print(8000 / (128/tmpDiv));
-    Serial.print(", divider=");
-    Serial.print(tmpDiv);
+    Serial.print(64000 / pwmRangeMax);
     Serial.print(", rest=");
     Serial.print(tmpDriveRestValue == HIGH ? "Brake" : "Coast");
-    Serial.print(", boost=");
-    Serial.print(tmpBoostEnabled ? "True" : "False");
     Serial.print(", rControl=");
     Serial.println(rControl ? "True" : "False");
+
+    Serial.print("val=");
+    Serial.println(av);
+
   }
 
-
-  int16_t av;
-
-  if(rControl)
-  {
-    getSteeringDirection(&av);
-  }
-  else
-  {
-    av = factor * val;
-  }
-  
-  motorValueSet(0, av);
-  motorValueSet(1, av);
-
-  motorOutputUpdate();
-
-
-  Serial.print("val=");
-  Serial.println(av);
-
-  delay(100);
 
   //monitorRcReceiverStatus();
 }
@@ -765,12 +690,12 @@ void setup()
   TCCR2A = 0;// set entire TCCR2A register to 0
   TCCR2B = 0;// same for TCCR2B
   TCNT2  = 0;//initialize counter value to 0
-  // set compare match register for 16khz increments (with no prescaler)
+  // set compare match register for 64khz increments (with no prescaler)
   OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
   //Set CS21 bit for 8 prescaler
-  TCCR2B |= (1 << CS21);
+  TCCR2B |= (1 << CS20);    //CS21 was active for division by 8
   // enable timer compare interrupt
   TIMSK2 |= (1 << OCIE2A);
 
