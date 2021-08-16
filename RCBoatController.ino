@@ -85,8 +85,16 @@ void motorOutputUpdate()
 
     if(m->enable)
     {
-      m->drive = ((m->value < 0) ? MOTOR_REVERSE : MOTOR_FORWARD);
-      m->pwmValue = m->value;
+      if(m->value == 0)
+      {
+        m->drive = MOTOR_COAST;
+      }
+      else
+      {
+        m->drive = ((m->value < 0) ? MOTOR_REVERSE : MOTOR_FORWARD);
+      }
+
+      m->pwmValue = abs(m->value);
     }
     else
     {
@@ -156,6 +164,7 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
   {
     motor_t *m = &(motor[i]);
     pwmChannelPair_t *cp = &(chPair[i]);
+    uint8_t driveRestValue = (m->pwmValue < 50) ? LOW : HIGH; /*for less than 20, coast during PWM idle, otherwise brake*/
 
     cp->width = m->pwmValue;
     switch(m->drive)
@@ -166,8 +175,8 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
         cp->activeDutyValue[1] = LOW;
 
         /*rest: brake*/
-        cp->passiveDutyValue[0] = HIGH;
-        cp->passiveDutyValue[1] = HIGH;
+        cp->passiveDutyValue[0] = driveRestValue;
+        cp->passiveDutyValue[1] = driveRestValue;
         break;
 
       case MOTOR_REVERSE:
@@ -176,8 +185,8 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
         cp->activeDutyValue[1] = HIGH;
 
         /*rest: brake*/
-        cp->passiveDutyValue[0] = HIGH;
-        cp->passiveDutyValue[1] = HIGH;
+        cp->passiveDutyValue[0] = driveRestValue;
+        cp->passiveDutyValue[1] = driveRestValue;
         break;
 
       case MOTOR_BRAKE:
@@ -186,8 +195,8 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
         cp->activeDutyValue[1] = HIGH;
 
         /*rest: coast*/
-        cp->passiveDutyValue[0] = HIGH;
-        cp->passiveDutyValue[1] = HIGH;
+        cp->passiveDutyValue[0] = LOW;
+        cp->passiveDutyValue[1] = LOW;
         break;
 
       default:
@@ -458,9 +467,10 @@ void loop()
   }
 #endif
 
-  static int16_t val = 0;
+  static int16_t val = 10;
   int16_t dir=0;
 
+#if 0
 
   val = (val+1) % 11;
 
@@ -478,9 +488,42 @@ void loop()
 
   motorOutputUpdate();
   
-  delay(1000);
 
-  monitorRcReceiverStatus();
+#endif
+
+//  val = 10;
+  static bool up = true;
+  static int16_t factor = 1;
+  Serial.println(val);
+  motorValueSet(0, val);
+  motorValueSet(1, val);
+
+  motorOutputUpdate();
+
+  if(up)
+  {
+    val++;
+    if(val >= 50) 
+    {
+      up = false;
+      factor = 1;
+    }
+  }  
+  else
+  {
+    val--;
+    if(val <= 2)
+    {
+      up = true;
+      factor = -1;
+    }
+  }
+
+
+
+  delay(100);
+
+ // monitorRcReceiverStatus();
 }
 
 
