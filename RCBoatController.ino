@@ -1,7 +1,13 @@
 #include "Arduino.h"
 #include <stdint.h>
-#define PIN_CH1     2
-#define PIN_CH2     3
+#define PIN_CH1     2   /*note: this flexible configuraion is NOT used in ext0 ISR*/
+#define PIN_CH2     3   /*note: this flexible configuraion is NOT used in ext1 ISR*/
+
+#define ISR_DIVIDER   32   // MUST be power of 2!
+constexpr int16_t pwmRangeMin = -1 * (256 / ISR_DIVIDER);
+constexpr int16_t pwmRangeMax = 256 / ISR_DIVIDER;
+
+
 
 typedef struct 
 {
@@ -25,7 +31,7 @@ typedef enum
 
 typedef struct 
 {
-  uint8_t width;  /*0...127*/
+  uint8_t width;  /*0...pwmRangeMax*/
 
   /*the channels A&B are driven as a pair: typically the active duty cycle is either fwd/rev and the rest is braking*/
   uint8_t activeDutyValue[2]; 
@@ -42,9 +48,6 @@ typedef struct
   motorDrive_t drive;
 } motor_t;
 
-#define ISR_DIVIDER   16   // MUST be power of 2! 
-constexpr int16_t pwmRangeMin = -1 * (256 / ISR_DIVIDER);
-constexpr int16_t pwmRangeMax = 256 / ISR_DIVIDER;
 
 
 
@@ -118,6 +121,15 @@ void motorValueSet(int idx, int16_t valueInPercent)
   {
     motor_t *m = &(motor[idx]);
     m->value = map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
+  }
+}
+
+int16_t motorPwmValueGet(int idx)
+{
+  if(idx < 2)
+  {
+    motor_t *m = &(motor[idx]);
+    return m->pwmValue;
   }
 }
 
@@ -280,7 +292,7 @@ ISR(TIMER2_COMPA_vect)
   static pwmChannelPair_t chPair[2];
   int i;
 
-  digitalWrite(4, HIGH);
+//  digitalWrite(4, HIGH);
 
   timerCounter++;
 
@@ -324,8 +336,7 @@ ISR(TIMER2_COMPA_vect)
 
   tickCounter++;
 
-  digitalWrite(4, LOW);
-
+//  digitalWrite(4, LOW);
 }
 
 
@@ -344,7 +355,7 @@ void incomingPulse(rcContext_t* c, int pin)
 {
   uint32_t ts = micros();
 
-  digitalWrite(5, HIGH);
+  //digitalWrite(5, HIGH);
 
   bool rising = PORTD & (0x1 << pin);//digitalRead(pin) == HIGH;
 
@@ -394,7 +405,7 @@ void incomingPulse(rcContext_t* c, int pin)
   }
 
 
-  digitalWrite(5, LOW);
+  //digitalWrite(5, LOW);
 }
 
 void ch1Pulse()
@@ -502,84 +513,11 @@ bool speedControl()
 
 void loop()
 {
-#if 0
-  uint32_t pw, cw;
-  int16_t dir;
-
-  if(getSteeringDirection(&dir))
-  {
-    Serial.print(dir);
-  }
-  else
-  {
-    Serial.print(0);
-  }
-
-  Serial.print("\t");
-
-  if(getData(0, &pw, &cw))
-  {
-    Serial.print(pw);
-    Serial.print("\t");
-    Serial.println(cw);
-  }
-  else
-  {
-    Serial.println("0\t0");
-  }
-#endif
-
-  static int16_t val = 10;
+  static int16_t val = 0;
   int16_t dir=0;
-
-#if 0
-
-  val = (val+1) % 11;
-
-  #if 0
-//  motorValueSet(0, val-100);
-  if(getSteeringDirection(&dir))
-  {
-    motorValueSet(0, dir);
-  }
-  #endif
-
-  Serial.println(val*10);
-  motorValueSet(0, val*10);
-  motorValueSet(1, -1*(val*10));
-
-  motorOutputUpdate();
-  
-
-#endif
-
-//  val = 10;
   static bool up = true;
   static int16_t factor = 1;
   static bool rControl = false;
-
-
-
-/*
-  if(up)
-  {
-    val++;
-    if(val >= 50) 
-    {
-      up = false;
-      factor = 1;
-    }
-  }  
-  else
-  {
-    val--;
-    if(val <= 0)
-    {
-      up = true;
-      factor = -1;
-    }
-  }
-*/
   int16_t av;
 
   if(rControl)
@@ -588,9 +526,7 @@ void loop()
   }
   else
   {
-    static uint8_t x=0;
-    av = map(x++, 0, 255, 10, 90);
-//    av = factor * val;
+    av = factor * val;
   }
   
   motorValueSet(0, av);
@@ -638,7 +574,9 @@ void loop()
     Serial.println(rControl ? "True" : "False");
 
     Serial.print("val=");
-    Serial.println(av);
+    Serial.print(av);
+    Serial.print(", m0Raw=");
+    Serial.println(motorPwmValueGet(0));
 
   }
 
