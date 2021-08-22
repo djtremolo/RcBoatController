@@ -31,11 +31,14 @@ typedef enum
 
 typedef struct 
 {
-  uint8_t width;  /*0...pwmRangeMax*/
+  uint16_t activeWidth; /*ticks to stay active*/
+  uint16_t totalWidth;  /*ticks to rest*/
 
   /*the channels A&B are driven as a pair: typically the active duty cycle is either fwd/rev and the rest is braking*/
   uint8_t activeDutyValue[2]; 
   uint8_t passiveDutyValue[2];
+
+  bool resetCycle;
 } pwmChannelPair_t;
 
 
@@ -109,7 +112,7 @@ void motorOutputUpdate()
     else
     {
       m->drive = MOTOR_COAST;
-      m->pwmValue = pwmRangeMax;  /*full cycle*/
+      m->pwmValue = 100;  /*full cycle*/
     }
   }
 }
@@ -120,7 +123,7 @@ void motorValueSet(int idx, int16_t valueInPercent)
   if(idx < 2)
   {
     motor_t *m = &(motor[idx]);
-    m->value = map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
+    m->value = valueInPercent; //map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
   }
 }
 
@@ -209,11 +212,24 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
   int i;
   for(i = 0; i < 2; i++)
   {
-//    static int boostCntr[2] = {0};
     motor_t *m = &(motor[i]);
     pwmChannelPair_t *cp = &(chPair[i]);
 
-    cp->width = m->pwmValue;
+    if(m->pwmValue != 0)
+    {
+      cp->totalWidth = 100; //map(abs(m->pwmValue), 10, 90, 2000, 100);
+      cp->activeWidth = map(abs(m->pwmValue), 10, 90, 0, cp->totalWidth);
+//    cp->totalWidth = map(abs(m->pwmValue), 0, 100, 2000, 100);
+//    cp->activeWidth = map(abs(m->pwmValue), 0, 100, 0, cp->totalWidth);
+    }
+    else
+    {
+      cp->totalWidth = 100;
+      cp->activeWidth = 0;
+    }
+
+    cp->resetCycle = false;
+
     switch(m->drive)
     {
       case MOTOR_FORWARD:
@@ -286,42 +302,65 @@ void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
   }
 }
 
+
+static pwmChannelPair_t chPair[2] = {0};
+
+void initializePwm(bool enable)
+{
+  pwmEnable = false;
+  memset(&(chPair[0]), 0, sizeof(pwmChannelPair_t));
+  memset(&(chPair[1]), 0, sizeof(pwmChannelPair_t));
+
+  chPair[0].resetCycle = true;
+  chPair[1].resetCycle = true;
+
+  pwmEnable = enable;  
+}
+
 ISR(TIMER2_COMPA_vect)
 {
-  static uint8_t tickCounter = 0;
-  static pwmChannelPair_t chPair[2];
-  int i;
+  static bool cycleDone[2] = {0};
+  int m;
 
-//  digitalWrite(4, HIGH);
+  digitalWrite(4, HIGH);
 
   timerCounter++;
 
-  /////////////////////if(pwmEnable)
-  if(1)
+  if(pwmEnable)
   {
-    if((tickCounter & (pwmRangeMax-1)) == 0)
+    for(m = 0; m < 2; m++)
     {
-      /*capture new values*/
-      getMotorPwmValues(chPair);
+      pwmChannelPair_t *cp = &(chPair[m]);
 
-      setMotorPinsISR(0, chPair[0].activeDutyValue[0], chPair[0].activeDutyValue[1]);
-      setMotorPinsISR(1, chPair[1].activeDutyValue[0], chPair[1].activeDutyValue[1]);
-    }
-    else
-    {
-      for(i=0; i<2; i++)
+      if(cp->resetCycle)
       {
-        pwmChannelPair_t *cp = &(chPair[i]);
+        /*capture new values*/
+        getMotorPwmValues(cp);
 
-        if(cp->width > 0)
+        setMotorPinsISR(m, cp->activeDutyValue[0], cp->activeDutyValue[1]);
+      }
+      else
+      {
+        if(cp->totalWidth > 0)
         {
-          cp->width--;
+          cp->totalWidth--;
 
           /*check if it changed from one to zero*/
-          if(cp->width == 0)
+          if(cp->totalWidth == 0)
           {
-            /*clear output*/
-            setMotorPinsISR(i, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
+            cp->resetCycle = true;
+          }
+
+          if(cp->activeWidth > 0)
+          {
+            cp->activeWidth--;
+
+            /*check if it changed from one to zero*/
+            if(cp->activeWidth == 0)
+            {
+              /*clear output*/
+              setMotorPinsISR(m, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
+            }
           }
         }
       }
@@ -334,9 +373,7 @@ ISR(TIMER2_COMPA_vect)
     setMotorPinsISR(1, LOW, LOW);
   }
 
-  tickCounter++;
-
-//  digitalWrite(4, LOW);
+  digitalWrite(4, LOW);
 }
 
 
@@ -393,7 +430,6 @@ void incomingPulse(rcContext_t* c, int pin)
   {
     /*everything looks good*/
     c->signalOk = true;
-    pwmEnable = true;
   }
   else
   {
@@ -629,11 +665,16 @@ void setup()
   TCCR2B = 0;// same for TCCR2B
   TCNT2  = 0;//initialize counter value to 0
   // set compare match register for 64khz increments (with no prescaler)
-  OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
+//  OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
+  OCR2A = 50;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz  //68 -> 32kHz  //34 -> 64kHz
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
-  //Set CS21 bit for 8 prescaler
-  TCCR2B |= (1 << CS20);    //CS21 was active for division by 8
+
+  /*prescaler*/
+  TCCR2B |= (1 << CS21);    //CS21 for division by 8
+//  TCCR2B |= (1 << CS20);    //CS20 to disable prescaler
+
+
   // enable timer compare interrupt
   TIMSK2 |= (1 << OCIE2A);
 
@@ -648,6 +689,5 @@ void setup()
   motorEnable(0, true);
   motorEnable(1, true);
 
-
-  pwmEnable = true;
+  initializePwm(true);
 }
