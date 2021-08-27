@@ -1,11 +1,13 @@
 #include "Arduino.h"
 #include <stdint.h>
-#define PIN_CH1     2   /*note: this flexible configuraion is NOT used in ext0 ISR*/
-#define PIN_CH2     3   /*note: this flexible configuraion is NOT used in ext1 ISR*/
 
-#define ISR_DIVIDER   32   // MUST be power of 2!
-constexpr int16_t pwmRangeMin = -1 * (256 / ISR_DIVIDER);
-constexpr int16_t pwmRangeMax = 256 / ISR_DIVIDER;
+
+#define RC_INPUT_REGISTER           PIND
+#define RC_DIRECTION_REGISTER       DDRD
+#define RC_OUTPUT_REGISTER          PORTD
+
+#define RC_BIT_DIRECTION            2
+#define RC_BIT_THROTTLE             3
 
 
 
@@ -52,44 +54,56 @@ typedef struct
 } motor_t;
 
 
+void rcContextInitialize(rcContext_t* c);
+void motorInitialize();
+void motorOutputUpdate();
+void motorValueSet(int idx, int16_t valueInPercent);
+void motorEnable(int idx, bool enable);
+void monitorRcReceiverStatus();
+void initializePwm(bool enable);
+void getMotorPwmValues(pwmChannelPair_t* chPair);
+bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted);
+void isrRcIncomingPulse(rcContext_t* c, int pin);
+void isrDirectionSignalChange();
+void isrThrottleSignalChange();
+bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth);
+bool getSteeringDirection(int16_t *directionPercent);
+bool getThrottlePosition(int16_t *throttlePosition);
+float calculateSteeringStrength(int16_t throttle);
+bool speedControl(int16_t *motorL, int16_t *motorR);
+int16_t getBatteryLevel();
+void setupRadioControlInput();
+void setupPwmTimer();
+void setupMotorOutputPins();
+
 
 
 rcContext_t rcContext[2];
 motor_t motor[2];
+uint32_t pulseCounter[2] = {0};
+bool pwmEnable = false;
+
+static pwmChannelPair_t chPair[2] = {0};
+
+
 
 void rcContextInitialize(rcContext_t* c)
 {
   memset(c, 0, sizeof(rcContext_t));
 }
 
-void motorInitialize(motor_t* m)
+void motorInitialize()
 {
-  memset(m, 0, sizeof(motor_t));
+  int i;
+  for(i=0; i<2; i++)
+  {
+    motor_t* m = &(motor[i]);
+
+    memset(m, 0, sizeof(motor_t));
+    motorValueSet(i, 0);
+    motorEnable(i, true);
+  }
 }
-
-void getMotorPwmValues(pwmChannelPair_t* chPair);
-
-
-void ch1Pulse();
-void ch2Pulse();
-
-
-uint32_t pulseCounter[2] = {0};
-uint32_t timerCounter = 0;
-
-#define M1_FWD  0
-#define M1_REV  1
-#define M2_FWD  2
-#define M2_REV  3
-
-int pwmOutputPins[4] = {A0, A1, A2, A3};
-//PORTC: bit0 = A0 etc
-
-bool pwmEnable = false;
-
-static pwmChannelPair_t chPair[2] = {0};
-
-
 
 void motorOutputUpdate()
 {
@@ -127,15 +141,6 @@ void motorValueSet(int idx, int16_t valueInPercent)
   {
     motor_t *m = &(motor[idx]);
     m->value = valueInPercent; //map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
-  }
-}
-
-int16_t motorPwmValueGet(int idx)
-{
-  if(idx < 2)
-  {
-    motor_t *m = &(motor[idx]);
-    return m->pwmValue;
   }
 }
 
@@ -184,32 +189,6 @@ void monitorRcReceiverStatus()
 uint16_t tmpDriveRestValue = HIGH;
 bool tmpBoostEnabled = false;
 
-bool applyBoost(uint8_t *width, int *cntr)
-{
-  bool ret = false;
-
-  if(tmpBoostEnabled)
-  {
-    if(*cntr <= 5)
-    {
-      if(*width > 0)
-      {
-        ret = true;
-        *width = 128;
-      }
-      else if(*width < 0)
-      {
-        ret = true;
-        *width = -128;
-      }
-    }
-
-    *cntr = (*cntr +1) % 100;
-  }
-
-  return ret;
-}
-
 void initializePwm(bool enable)
 {
   pwmEnable = false;
@@ -222,8 +201,6 @@ void initializePwm(bool enable)
   pwmEnable = enable;  
 }
 
-
-#define BRAKE_DURING_PWM_IDLE   true
 
 void getMotorPwmValues(pwmChannelPair_t* chPair)
 {
@@ -239,8 +216,6 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
       
       cp->totalWidth = map(pwmAbs, 0, 100, 100, 20);
       cp->activeWidth = map(pwmAbs, 0, 100, 0, cp->totalWidth);
-//    cp->totalWidth = map(abs(m->pwmValue), 0, 100, 2000, 100);
-//    cp->activeWidth = map(abs(m->pwmValue), 0, 100, 0, cp->totalWidth);
     }
     else
     {
@@ -259,13 +234,8 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
         cp->activeDutyValue[1] = LOW;
 
         /*rest: brake*/
-#if BRAKE_DURING_PWM_IDLE        
         cp->passiveDutyValue[0] = HIGH;
         cp->passiveDutyValue[1] = HIGH;
-#else
-        cp->passiveDutyValue[0] = LOW;
-        cp->passiveDutyValue[1] = LOW;
-#endif
         break;
 
       case MOTOR_REVERSE:
@@ -274,13 +244,8 @@ void getMotorPwmValues(pwmChannelPair_t* chPair)
         cp->activeDutyValue[1] = HIGH;
 
         /*rest: brake*/
-#if BRAKE_DURING_PWM_IDLE        
         cp->passiveDutyValue[0] = HIGH;
         cp->passiveDutyValue[1] = HIGH;
-#else
-        cp->passiveDutyValue[0] = LOW;
-        cp->passiveDutyValue[1] = LOW;
-#endif
         break;
 
       case MOTOR_BRAKE:
@@ -338,10 +303,6 @@ ISR(TIMER2_COMPA_vect)
   static bool cycleDone[2] = {0};
   int m;
 
-  //digitalWrite(4, HIGH);
-
-  timerCounter++;
-
   if(pwmEnable)
   {
     for(m = 0; m < 2; m++)
@@ -388,8 +349,6 @@ ISR(TIMER2_COMPA_vect)
     setMotorPinsISR(0, LOW, LOW);
     setMotorPinsISR(1, LOW, LOW);
   }
-
-  //digitalWrite(4, LOW);
 }
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
@@ -404,15 +363,12 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 uint32_t rcCntr = 0;
 
 
-void incomingPulse(rcContext_t* c, int pin)
+void isrRcIncomingPulse(rcContext_t* c, int pin)
 {
   uint32_t ts = micros();
+  bool rising = PIND & (0x1 << pin);
 
   rcCntr++;
-
-  //digitalWrite(5, HIGH);
-
-  bool rising = PIND & (0x1 << pin);
 
   if(rising)
   {
@@ -457,19 +413,17 @@ void incomingPulse(rcContext_t* c, int pin)
       rcContextInitialize(c);
     }
   }
-
-
-  //digitalWrite(5, LOW);
 }
 
-void ch1Pulse()
+void isrDirectionSignalChange()
 {
-  incomingPulse(&(rcContext[0]), PIN_CH1);
+  isrRcIncomingPulse(&(rcContext[0]), RC_BIT_DIRECTION);
   pulseCounter[0]++;
 }
-void ch2Pulse()
+
+void isrThrottleSignalChange()
 {
-  incomingPulse(&(rcContext[1]), PIN_CH2);
+  isrRcIncomingPulse(&(rcContext[1]), RC_BIT_THROTTLE);
   pulseCounter[1]++;
 }
 
@@ -547,201 +501,91 @@ bool getThrottlePosition(int16_t *throttlePosition)
   return ret;
 }
 
-
-bool speedControl()
+float calculateSteeringStrength(int16_t throttle)
 {
-  int16_t throttle;
-  int16_t direction;
+  float pct;
 
-  if(getSteeringDirection(&direction))
-  {
-    if(getThrottlePosition(&throttle))
-    {
-      float leftMotor; 
-      float rightMotor;
-      float divider = ((float)abs(throttle)) / 10.0;
-      if(divider < 1.0) divider = 1.0;
-      float steeringStrength = 2.0 / divider; /*value will be in range of 200% ... 20% depending on throttle*/
+  pct = (5.0 / (abs(throttle) / 10.0));
 
-      float primaryMotorScale = 1.0;
-      float anotherMotorScale = (((float)abs(direction)) * steeringStrength) / 100.0;
-
-      if(throttle > 0)
-      {
-        /*forward*/
-      }
-    }
-  }
-
-
+  return pct;
 }
 
 
-
-void loop()
+bool speedControl(int16_t *motorL, int16_t *motorR)
 {
-  static int16_t val = 0;
-  int16_t dir=0;
-  static bool up = true;
-  static int16_t factor = 1;
-  static bool rControl = false;
-  int16_t av;
+  bool ret = false;
+  int16_t throttleInPercent;
+  int16_t directionInPercent;
 
-
-#if 0
-
-  if (Serial.available() > 0) 
+  if(getSteeringDirection(&directionInPercent))
   {
-    char ch = Serial.read();
-    if(ch>='0' && ch <='9')
+    if(getThrottlePosition(&throttleInPercent))
     {
-      val = (int16_t)(ch-'0')*10;
-    }
-    else if(ch=='-')
-    {
-      val--;
-      //factor = -1;
-    }
-    else if(ch=='+')
-    {
-      val++;
-      //factor = 1;
-    }
-    else if(ch=='r' || ch == 'R')
-    {
-      tmpDriveRestValue = (tmpDriveRestValue == HIGH ? LOW : HIGH);
-    }
-    else if(ch=='b' || ch == 'B')
-    {
-      tmpBoostEnabled = !tmpBoostEnabled;
-    }
-    else if(ch=='c' || ch == 'C')
-    {
-      rControl = !rControl;
-    }
+      int16_t outL = 0;
+      int16_t outR = 0;
 
-#if 0
-    Serial.print("swFreq=");
-    Serial.print(64000 / pwmRangeMax);
-    Serial.print(", rest=");
-    Serial.print(tmpDriveRestValue == HIGH ? "Brake" : "Coast");
-    Serial.print(", rControl=");
-    Serial.println(rControl ? "True" : "False");
+      if(throttleInPercent != 0)
+      {
+        float throttle = throttleInPercent / 100.0;
+        float steeringStrength = calculateSteeringStrength(throttleInPercent);
 
-    Serial.print("val=");
-    Serial.print(av);
-    Serial.print(", m0Raw=");
-    Serial.println(motorPwmValueGet(0));
-#endif
+        float factorL, factorR;
+        float adjustedFactorL, adjustedFactorR;
+        float nonSaturatedL, nonSaturatedR;
+        float preSaturationFactor;
+        float saturationFactor;
+
+        factorL = (float)((100-directionInPercent) / 100.0);
+        factorR = (float)((100+directionInPercent) / 100.0);
+
+        adjustedFactorL = (float)(factorL * steeringStrength);
+        adjustedFactorR = (float)(factorR * steeringStrength);
+
+        nonSaturatedL = (float)(throttle + (adjustedFactorL * throttle));
+        nonSaturatedR = (float)(throttle + (adjustedFactorR * throttle));
+
+        preSaturationFactor = (abs(nonSaturatedL) > abs(nonSaturatedR) ? nonSaturatedL : nonSaturatedR);
+
+        saturationFactor = (((abs(nonSaturatedL) < throttle) && abs(nonSaturatedR) < throttle) ? 1.0 : throttle / preSaturationFactor);
+
+        outL = (int16_t)((nonSaturatedL * saturationFactor) * 100.0);
+        outR = (int16_t)((nonSaturatedR * saturationFactor) * 100.0);
+      }
+
+      *motorL = outL;
+      *motorR = outR;
+
+      ret = true;
+    }
   }
-#endif
+}
 
-
-#if 0
+int16_t getBatteryLevel()
+{
   int32_t bvRaw = analogRead(A4);
   constexpr int32_t factorToMicroVolts = 1074 * (8500 / 1060);
-  int32_t bvMilliVolts = ((bvRaw * factorToMicroVolts) / 1000);
-#endif
+  int16_t bvMilliVolts = ((bvRaw * factorToMicroVolts) / 1000);
 
-  int16_t direction, throttle;  
-
-  if(getSteeringDirection(&direction) && getThrottlePosition(&throttle))
-  {
-#if 0
-    Serial.print("[");
-    Serial.print(direction);
-    Serial.print(",");
-    Serial.print(throttle);
-    Serial.print("] ");
-#endif
-    val = throttle;
-  }
-
-#if 0  
-  Serial.print("[");
-  uint32_t pw, cw;
-  if(getData(0, &pw, &cw))
-  {
-    Serial.print(pw);
-    Serial.print("/");
-    Serial.print(cw);
-    Serial.print(",");
-  }
-  if(getData(1, &pw, &cw))
-  {
-    Serial.print(pw);
-    Serial.print("/");
-    Serial.print(cw);
-    Serial.print(",");
-  }
-  Serial.print("] ");
-
-
-  Serial.print(rcCntr % 100);
-  Serial.print(",");
-  Serial.print(bvMilliVolts / 100);
-  Serial.print(",");
-  Serial.println(av);
-
-#endif
-
-
-  av = factor * val;
-  motorValueSet(0, av);
-  motorValueSet(1, av);
-
-  motorOutputUpdate();
-
-  monitorRcReceiverStatus();
-
-  delay(1);
-
+  return bvMilliVolts;
 }
 
-
-
-
-
-void setup()
+void setupRadioControlInput()
 {
-  int i;
-  // -- Mark pin 13 as an output pin.
-  //pinMode(13, OUTPUT);
-
-  analogReference(INTERNAL);
-
-  pinMode(PIN_CH1, INPUT);
-  pinMode(PIN_CH2, INPUT);
-  pinMode(13, OUTPUT);
-
-
-  pinMode(4, OUTPUT);
-  pinMode(5, OUTPUT);
-
-
-  for(i=0; i<4; i++)
-  {    
-    pinMode(pwmOutputPins[i], OUTPUT);
-    digitalWrite(pwmOutputPins[i], LOW);
-  }
-
-
-  Serial.begin(115200);
-
   rcContextInitialize(&(rcContext[0]));
   rcContextInitialize(&(rcContext[1]));
 
-  motorInitialize(&(motor[0]));
-  motorInitialize(&(motor[1]));
+  constexpr uint8_t mask = (1 << RC_BIT_DIRECTION) | (1 << RC_BIT_THROTTLE);
 
-  cli();  /*disable*/
+  RC_DIRECTION_REGISTER = RC_DIRECTION_REGISTER & (~mask);  //force chosen bits to zero = input
 
-  attachInterrupt(digitalPinToInterrupt(PIN_CH1), ch1Pulse, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(PIN_CH2), ch2Pulse, CHANGE);
+  /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
+  attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RC_BIT_THROTTLE), isrThrottleSignalChange, CHANGE);
+}
 
-#if 1
 
-
+void setupPwmTimer()
+{
   //set timer2 interrupt at 16kHz
   TCCR2A = 0;// set entire TCCR2A register to 0
   TCCR2B = 0;// same for TCCR2B
@@ -759,18 +603,63 @@ void setup()
 
   // enable timer compare interrupt
   TIMSK2 |= (1 << OCIE2A);
+}
 
-#endif
+void setupMotorOutputPins()
+{
+  pinMode(A0, OUTPUT);
+  pinMode(A1, OUTPUT);
+  pinMode(A2, OUTPUT);
+  pinMode(A3, OUTPUT);
 
-  /*the ISR will be called at 16kHz interval -> 128 pwm steps -> 8ms per cycle*/
+  digitalWrite(A0, LOW);
+  digitalWrite(A1, LOW);
+  digitalWrite(A2, LOW);
+  digitalWrite(A3, LOW);
+}
 
+void setup()
+{
+  Serial.begin(115200);
+
+  analogReference(INTERNAL);
+
+  pinMode(13, OUTPUT);
+
+  setupMotorOutputPins();
+
+  motorInitialize();
+
+  cli();  /*disable*/
+  setupRadioControlInput();
+  setupPwmTimer();
   sei();  /*enable*/
 
-  motorValueSet(0, 0);
-  motorValueSet(1, 0);
-
-  motorEnable(0, true);
-  motorEnable(1, true);
 
   initializePwm(true);
 }
+
+void loop()
+{
+  int16_t leftMotorValue, rightMotorValue;
+
+  if(speedControl(&leftMotorValue, &rightMotorValue))
+  {
+    motorValueSet(0, leftMotorValue);
+    motorValueSet(1, rightMotorValue);
+    motorOutputUpdate();
+  }
+  else
+  {
+    /*fallback to idle*/
+    motorValueSet(0, 0);
+    motorValueSet(1, 0);
+    motorOutputUpdate();
+  }
+
+  monitorRcReceiverStatus();
+
+  delay(1);
+}
+
+
