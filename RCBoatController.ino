@@ -33,14 +33,16 @@ typedef enum
 
 typedef struct 
 {
-  uint16_t activeWidth; /*ticks to stay active*/
-  uint16_t totalWidth;  /*ticks to rest*/
+  bool resetCycle;
 
   /*the channels A&B are driven as a pair: typically the active duty cycle is either fwd/rev and the rest is braking*/
   uint8_t activeDutyValue[2]; 
   uint8_t passiveDutyValue[2];
 
-  bool resetCycle;
+  uint16_t activeWidth; /*copied from pre-calculated values: ticks to stay active*/
+  uint16_t totalWidth;  /*copied from pre-calculated values: ticks to rest*/
+
+  motorDrive_t drive;
 } pwmChannelPair_t;
 
 
@@ -50,6 +52,13 @@ typedef struct
   bool enable;
   int16_t value;    /*free to be written at any time*/
   int16_t pwmValue; /*copied from value at update()*/
+
+  uint8_t activeDutyValue[2]; 
+  uint8_t passiveDutyValue[2];
+
+  uint16_t activeWidth; /*pre-calculated for ISR: ticks to stay active*/
+  uint16_t totalWidth;  /*pre-calculated for ISR: ticks to rest*/
+
   motorDrive_t drive;
 } motor_t;
 
@@ -78,12 +87,37 @@ void setupMotorOutputPins();
 
 
 
-rcContext_t rcContext[2];
+volatile rcContext_t rcContext[2];
 motor_t motor[2];
 uint32_t pulseCounter[2] = {0};
 bool pwmEnable = false;
 
 static pwmChannelPair_t chPair[2] = {0};
+
+
+
+
+void DBGOUT_1_ON()
+{
+  constexpr uint8_t mask = 1 << 4;
+  PORTD |= mask;
+}
+void DBGOUT_1_OFF()
+{
+  constexpr uint8_t mask = ~(1 << 4);
+  PORTD &= mask;
+}
+
+void DBGOUT_2_ON()
+{
+  constexpr uint8_t mask = 1 << 5;
+  PORTD |= mask;
+}
+void DBGOUT_2_OFF()
+{
+  constexpr uint8_t mask = ~(1 << 5);
+  PORTD &= mask;
+}
 
 
 
@@ -115,21 +149,82 @@ void motorOutputUpdate()
 
     if(m->enable)
     {
-      if(m->value == 0)
+      int16_t mv = m->value;
+      motorDrive_t drv = MOTOR_COAST;
+      if(mv != 0)
       {
-        m->drive = MOTOR_COAST;
-      }
-      else
-      {
-        m->drive = ((m->value < 0) ? MOTOR_REVERSE : MOTOR_FORWARD);
+        drv = ((mv < 0) ? MOTOR_REVERSE : MOTOR_FORWARD);
       }
 
-      m->pwmValue = abs(m->value);
+      int16_t pwmAbs = abs(mv);
+      uint16_t tw = map(pwmAbs, 0, 100, 100, 20);
+      uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
+
+      switch(drv)
+      {
+        case MOTOR_FORWARD:
+          /*active part: drive*/
+          m->activeDutyValue[0] = HIGH;
+          m->activeDutyValue[1] = LOW;
+
+          /*rest: brake*/
+          m->passiveDutyValue[0] = HIGH;
+          m->passiveDutyValue[1] = HIGH;
+          break;
+
+        case MOTOR_REVERSE:
+          /*active part: drive*/
+          m->activeDutyValue[0] = LOW;
+          m->activeDutyValue[1] = HIGH;
+
+          /*rest: brake*/
+          m->passiveDutyValue[0] = HIGH;
+          m->passiveDutyValue[1] = HIGH;
+          break;
+
+        case MOTOR_BRAKE:
+          /*active part: brake*/
+          m->activeDutyValue[0] = HIGH;
+          m->activeDutyValue[1] = HIGH;
+
+          /*rest: coast*/
+          m->passiveDutyValue[0] = LOW;
+          m->passiveDutyValue[1] = LOW;
+          break;
+
+        default:
+          /*active part: coast*/
+          m->activeDutyValue[0] = LOW;
+          m->activeDutyValue[1] = LOW;
+
+          /*rest: coast*/
+          m->passiveDutyValue[0] = LOW;
+          m->passiveDutyValue[1] = LOW;
+          break;
+      }
+
+//      cli();
+      m->drive = drv;
+      m->totalWidth = tw;
+      m->activeWidth = aw;
+      m->pwmValue = pwmAbs;
+//      sei();
     }
     else
     {
+//      cli();
       m->drive = MOTOR_COAST;
       m->pwmValue = 100;  /*full cycle*/
+
+      /*active part: coast*/
+      m->activeDutyValue[0] = LOW;
+      m->activeDutyValue[1] = LOW;
+
+      /*rest: coast*/
+      m->passiveDutyValue[0] = LOW;
+      m->passiveDutyValue[1] = LOW;
+
+//      sei();
     }
   }
 }
@@ -202,77 +297,27 @@ void initializePwm(bool enable)
 }
 
 
-void getMotorPwmValues(pwmChannelPair_t* chPair)
+void getMotorPwmValues(int idx)
 {
-  int i;
-  for(i = 0; i < 2; i++)
-  {
-    motor_t *m = &(motor[i]);
-    pwmChannelPair_t *cp = &(chPair[i]);
+  motor_t *m = &(motor[idx]);
+  pwmChannelPair_t *cp = &(chPair[idx]);
 
-    if(m->pwmValue != 0)
-    {
-      int16_t pwmAbs = abs(m->pwmValue);
-      
-      cp->totalWidth = map(pwmAbs, 0, 100, 100, 20);
-      cp->activeWidth = map(pwmAbs, 0, 100, 0, cp->totalWidth);
-    }
-    else
-    {
-      cp->totalWidth = 100;
-      cp->activeWidth = 0;
-    }
+  cp->totalWidth = m->totalWidth;
+  cp->activeWidth = m->activeWidth;
 
-    cp->resetCycle = false;
+  /*active part: drive*/
+  cp->activeDutyValue[0] = m->activeDutyValue[0];
+  cp->activeDutyValue[1] = m->activeDutyValue[1];
 
-    switch(m->drive)
-    {
-      case MOTOR_FORWARD:
+  /*rest: brake*/
+  cp->passiveDutyValue[0] = m->passiveDutyValue[0];
+  cp->passiveDutyValue[1] = m->passiveDutyValue[1];
 
-        /*active part: drive*/
-        cp->activeDutyValue[0] = HIGH;
-        cp->activeDutyValue[1] = LOW;
-
-        /*rest: brake*/
-        cp->passiveDutyValue[0] = HIGH;
-        cp->passiveDutyValue[1] = HIGH;
-        break;
-
-      case MOTOR_REVERSE:
-        /*active part: drive*/
-        cp->activeDutyValue[0] = LOW;
-        cp->activeDutyValue[1] = HIGH;
-
-        /*rest: brake*/
-        cp->passiveDutyValue[0] = HIGH;
-        cp->passiveDutyValue[1] = HIGH;
-        break;
-
-      case MOTOR_BRAKE:
-        /*active part: brake*/
-        cp->activeDutyValue[0] = HIGH;
-        cp->activeDutyValue[1] = HIGH;
-
-        /*rest: coast*/
-        cp->passiveDutyValue[0] = LOW;
-        cp->passiveDutyValue[1] = LOW;
-        break;
-
-      default:
-        /*active part: coast*/
-        cp->activeDutyValue[0] = LOW;
-        cp->activeDutyValue[1] = LOW;
-
-        /*rest: coast*/
-        cp->passiveDutyValue[0] = LOW;
-        cp->passiveDutyValue[1] = LOW;
-        break;
-    }
-  }
+  cp->resetCycle = false;
 }
 
-inline void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1) __attribute__((always_inline));
-void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
+inline void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1) __attribute__((always_inline));
+void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1)
 {
   //will fail if idx >= 2!
 
@@ -297,58 +342,60 @@ void setMotorPinsISR(int idx, uint8_t val0, uint8_t val1)
   }
 }
 
+uint32_t timerCntr=0;
 
 ISR(TIMER2_COMPA_vect)
 {
-  static bool cycleDone[2] = {0};
   int m;
 
-  if(pwmEnable)
+  DBGOUT_1_ON();
+
+  timerCntr++;
+
+  for(m = 0; m < 2; m++)
   {
-    for(m = 0; m < 2; m++)
+    pwmChannelPair_t *cp = &(chPair[m]);
+
+    if(cp->resetCycle)
     {
-      pwmChannelPair_t *cp = &(chPair[m]);
+      /*capture new values*/
+      getMotorPwmValues(m);
 
-      if(cp->resetCycle)
+      setMotorPinsISR(m, cp->activeDutyValue[0], cp->activeDutyValue[1]);
+    }
+    else
+    {
+      if(cp->totalWidth > 0)
       {
-        /*capture new values*/
-        getMotorPwmValues(cp);
+        cp->totalWidth--;
 
-        setMotorPinsISR(m, cp->activeDutyValue[0], cp->activeDutyValue[1]);
-      }
-      else
-      {
-        if(cp->totalWidth > 0)
+        /*check if it changed from one to zero*/
+        if(cp->totalWidth == 0)
         {
-          cp->totalWidth--;
+          cp->resetCycle = true;
+        }
+        if(cp->activeWidth > 0)
+        {
+          cp->activeWidth--;
 
           /*check if it changed from one to zero*/
-          if(cp->totalWidth == 0)
+          if(cp->activeWidth == 0)
           {
-            cp->resetCycle = true;
-          }
-
-          if(cp->activeWidth > 0)
-          {
-            cp->activeWidth--;
-
-            /*check if it changed from one to zero*/
-            if(cp->activeWidth == 0)
-            {
-              /*clear output*/
-              setMotorPinsISR(m, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
-            }
+            /*clear output*/
+            setMotorPinsISR(m, cp->passiveDutyValue[0], cp->passiveDutyValue[1]);
           }
         }
       }
+      else
+      {
+        cp->resetCycle = true;
+      }      
     }
   }
-  else
-  {
-    /*not enabled, clear all*/
-    setMotorPinsISR(0, LOW, LOW);
-    setMotorPinsISR(1, LOW, LOW);
-  }
+
+
+  DBGOUT_1_OFF();
+
 }
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
@@ -363,16 +410,19 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 uint32_t rcCntr = 0;
 
 
-void isrRcIncomingPulse(rcContext_t* c, int pin)
+void isrRcIncomingPulse(rcContext_t* c, const uint8_t pinMask)
 {
   uint32_t ts = micros();
-  bool rising = PIND & (0x1 << pin);
+  volatile bool rising = ((PIND & pinMask) == 0 ? false : true);
+
+  int ch = (pinMask==1<<RC_BIT_DIRECTION) ? 0 : 1;
+
 
   rcCntr++;
 
   if(rising)
   {
-    if(c->risingEdgeSeen && c->fallingEdgeSeen)
+    if(c->signalOk)
     {
       /*calculate cycle width*/
       c->cycleWidth = ts - c->prevRisingTs;
@@ -384,7 +434,7 @@ void isrRcIncomingPulse(rcContext_t* c, int pin)
   }
   else
   {
-    if(c->risingEdgeSeen && c->fallingEdgeSeen)
+    if(c->signalOk)
     {
       /*calculate pulse width*/
       c->pulseWidth = ts - c->prevRisingTs;
@@ -398,11 +448,13 @@ void isrRcIncomingPulse(rcContext_t* c, int pin)
   /*allow measurement only when both edge timestamps have been captured and widths are accepted*/
   if(c->risingEdgeSeen 
     && c->fallingEdgeSeen 
-    && checkRange(c->cycleWidth, 15000, 18000)
-    && checkRange(c->pulseWidth, 0, c->cycleWidth)
+  //  && checkRange(c->cycleWidth, 15000, 18000)    //  TODO move out from ISR to getData()
+  //  && checkRange(c->pulseWidth, 0, c->cycleWidth)  //  TODO move out from ISR to getData()
     )
   {
     /*everything looks good*/
+    pulseCounter[ch]++;
+
     c->signalOk = true;
   }
   else
@@ -415,16 +467,21 @@ void isrRcIncomingPulse(rcContext_t* c, int pin)
   }
 }
 
+
+
 void isrDirectionSignalChange()
 {
-  isrRcIncomingPulse(&(rcContext[0]), RC_BIT_DIRECTION);
-  pulseCounter[0]++;
+  constexpr uint8_t pinMask = 1 << RC_BIT_DIRECTION;
+  isrRcIncomingPulse(&(rcContext[0]), pinMask);
+  //pulseCounter[0]++;
 }
 
 void isrThrottleSignalChange()
 {
-  isrRcIncomingPulse(&(rcContext[1]), RC_BIT_THROTTLE);
-  pulseCounter[1]++;
+  constexpr uint8_t pinMask = 1 << RC_BIT_THROTTLE;
+  isrRcIncomingPulse(&(rcContext[1]), pinMask);
+
+  //pulseCounter[1]++;
 }
 
 bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
@@ -434,7 +491,8 @@ bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
   if(ch < 2)
   {
     rcContext_t *c = &(rcContext[ch]);
-//ZAIM!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!    if(c->signalOk)
+//ZAIM!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!    
+//    if(c->signalOk)
     {
       /*TODO: the reading should be atomic*/
       *pulseWidth = c->pulseWidth;
@@ -453,15 +511,18 @@ bool getSteeringDirection(int16_t *directionPercent)
 
   if(getData(0, &pw, &cw))
   {
-    int32_t dp = (int32_t)map(pw, 1110, 2064, -100, 100);
+    //if((pw>=1110) && (pw<=2064))
+    {
+      int32_t dp = (int32_t)map(pw, 1110, 2064, -100, 100);
 
-    if(abs(dp) < 5) dp = 0;
-    else if(dp > 100) dp = 100;
-    else if(dp < -100) dp = -100;
+      if(abs(dp) < 5) dp = 0;
+      else if(dp > 100) dp = 100;
+      else if(dp < -100) dp = -100;
 
-    *directionPercent = (int16_t)dp;
+      *directionPercent = (int16_t)dp;
 
-    ret = true;
+      ret = true;
+    }
   }
 
   return ret;
@@ -511,11 +572,14 @@ float calculateSteeringStrength(int16_t throttle)
 }
 
 
+
 bool speedControl(int16_t *motorL, int16_t *motorR)
 {
   bool ret = false;
   int16_t throttleInPercent;
   int16_t directionInPercent;
+
+DBGOUT_2_ON();
 
   if(getSteeringDirection(&directionInPercent))
   {
@@ -525,6 +589,7 @@ bool speedControl(int16_t *motorL, int16_t *motorR)
       int16_t outR = 0;
 
       if(throttleInPercent != 0)
+#if 0
       {
         float throttle = throttleInPercent / 100.0;
         float steeringStrength = calculateSteeringStrength(throttleInPercent);
@@ -551,13 +616,84 @@ bool speedControl(int16_t *motorL, int16_t *motorR)
         outL = (int16_t)((nonSaturatedL * saturationFactor) * 100.0);
         outR = (int16_t)((nonSaturatedR * saturationFactor) * 100.0);
       }
+#elif 0
+      {
+        int32_t throttleInPercent100x = throttleInPercent * 100;
+        int32_t throttleInPercent100xAbs = abs(throttleInPercent100x);
 
+        
+        int32_t steeringStrengthPct = (50000 / (abs(throttleInPercent100x) / 10));
+        int32_t factorL, factorR;
+        int32_t adjustedFactorL, adjustedFactorR;
+        int32_t nonSaturatedL, nonSaturatedR;
+        int32_t preSaturationFactor;
+        int32_t saturationFactor;
+        
+        factorL = 100-directionInPercent;
+        factorR = 100+directionInPercent;
+        
+        adjustedFactorL = (factorL * steeringStrengthPct) / 100;   //x10000 -> keep in 100x
+        adjustedFactorR = (factorR * steeringStrengthPct) / 100;
+        
+        nonSaturatedL = throttleInPercent100x + (adjustedFactorL * throttleInPercent);
+        nonSaturatedR = throttleInPercent100x + (adjustedFactorR * throttleInPercent);
+
+        int32_t nsAbsL = abs(nonSaturatedL);
+        int32_t nsAbsR = abs(nonSaturatedR);
+        
+        preSaturationFactor = (nsAbsL > nsAbsR ? nonSaturatedL : nonSaturatedR);
+        
+        saturationFactor = (((nsAbsL < throttleInPercent100xAbs) && (nsAbsR < throttleInPercent100xAbs)) ? 100 : (throttleInPercent100x * 100) / preSaturationFactor);
+        
+        outL = (int16_t)((nonSaturatedL * saturationFactor) / 10000);
+        outR = (int16_t)((nonSaturatedR * saturationFactor) / 10000);
+      }
+#elif 1
+      {
+        int16_t primaryMotor = throttleInPercent;
+
+        /*calculate value for the "another" motor*/
+
+        int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
+
+        if(directionInPercent < 0)
+        {
+          /*steering left*/
+          outL = secondaryMotor;
+          outR = primaryMotor;
+        }
+        else
+        {
+          /*steering right*/
+          outL = primaryMotor;
+          outR = secondaryMotor;
+        }
+      }
+
+#else
+      {
+        outL = outR = throttleInPercent;
+      }
+#endif
       *motorL = outL;
       *motorR = outR;
+
+
+      Serial.print(directionInPercent);
+      Serial.print(",");
+      Serial.print(throttleInPercent);
+      Serial.print(",");
+      Serial.print(outL);
+      Serial.print(",");
+      Serial.print(outR);
+      Serial.println(",-100,100");
 
       ret = true;
     }
   }
+
+DBGOUT_2_OFF();  
+  return ret;
 }
 
 int16_t getBatteryLevel()
@@ -592,13 +728,22 @@ void setupPwmTimer()
   TCNT2  = 0;//initialize counter value to 0
   // set compare match register for 64khz increments (with no prescaler)
 //  OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
-  OCR2A = 249;//50;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz  //68 -> 32kHz  //34 -> 64kHz
+  OCR2A = 32;//50;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz  //68 -> 32kHz  //34 -> 64kHz
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
 
   /*prescaler*/
-  TCCR2B |= (1 << CS21);    //CS21 for division by 8
-//  TCCR2B |= (1 << CS20);    //CS20 to disable prescaler
+  TCCR2B |= (1 << CS21);
+  TCCR2B |= (1 << CS20);
+
+  /*
+  CS22  CS21  CS20
+  0     0     1       no prescaling
+  0     1     0       clk/8
+  0     1     1       clk/32
+  
+  */
+
 
 
   // enable timer compare interrupt
@@ -626,40 +771,71 @@ void setup()
 
   pinMode(13, OUTPUT);
 
+
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+
+
   setupMotorOutputPins();
 
   motorInitialize();
 
+  initializePwm(true);
+
+
   cli();  /*disable*/
   setupRadioControlInput();
-  setupPwmTimer();
+
+///////////////////////////////////////////////////////////  
+setupPwmTimer();
+
   sei();  /*enable*/
 
 
-  initializePwm(true);
 }
+
+
 
 void loop()
 {
   int16_t leftMotorValue, rightMotorValue;
 
+#if 1
   if(speedControl(&leftMotorValue, &rightMotorValue))
   {
+    //Serial.println("OK");
     motorValueSet(0, leftMotorValue);
     motorValueSet(1, rightMotorValue);
     motorOutputUpdate();
   }
   else
   {
+    Serial.println("FAIL");
     /*fallback to idle*/
     motorValueSet(0, 0);
     motorValueSet(1, 0);
     motorOutputUpdate();
   }
-
   monitorRcReceiverStatus();
 
-  delay(1);
+#else
+
+  Serial.print(pulseCounter[0] % 200);
+  Serial.print(",");
+  Serial.print(pulseCounter[1] % 200);
+  Serial.print(",");
+  Serial.print(rcContext[0].pulseWidth);
+  Serial.print(",");
+  Serial.print(rcContext[0].cycleWidth);
+  Serial.print(",");
+  Serial.print(rcContext[1].pulseWidth);
+  Serial.print(",");
+  Serial.print(rcContext[1].cycleWidth);
+  Serial.println("");
+#endif
+
+
+  delay(100);
 }
 
 
