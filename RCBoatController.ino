@@ -157,7 +157,7 @@ void motorOutputUpdate()
       }
 
       int16_t pwmAbs = abs(mv);
-      uint16_t tw = map(pwmAbs, 0, 100, 100, 20);
+      uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
       uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
 
       switch(drv)
@@ -675,8 +675,8 @@ DBGOUT_2_ON();
         outL = outR = throttleInPercent;
       }
 #endif
-      *motorL = outL;
-      *motorR = outR;
+      *motorL = outR;
+      *motorR = outL;
 
 
       Serial.print(directionInPercent);
@@ -728,13 +728,13 @@ void setupPwmTimer()
   TCNT2  = 0;//initialize counter value to 0
   // set compare match register for 64khz increments (with no prescaler)
 //  OCR2A = 249;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz
-  OCR2A = 32;//50;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz  //68 -> 32kHz  //34 -> 64kHz
+  OCR2A = 64;//50;// = (16*10^6) / (8000*16) - 1 (must be <256)     // 124 will generate 16kHz  //68 -> 32kHz  //34 -> 64kHz
   // turn on CTC mode
   TCCR2A |= (1 << WGM21);
 
   /*prescaler*/
   TCCR2B |= (1 << CS21);
-  TCCR2B |= (1 << CS20);
+  //TCCR2B |= (1 << CS20);
 
   /*
   CS22  CS21  CS20
