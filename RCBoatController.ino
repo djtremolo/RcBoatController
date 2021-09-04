@@ -1,6 +1,6 @@
-#include "Arduino.h"
 #include <stdint.h>
-
+#include "Arduino.h"
+#include "PinChangeInterrupt.h"
 
 #define RC_INPUT_REGISTER           PIND
 #define RC_DIRECTION_REGISTER       DDRD
@@ -10,8 +10,15 @@
 #define RC_BIT_THROTTLE             3
 
 
+#define SS_INPUT_REGISTER           PIND
+#define SS_DIRECTION_REGISTER       DDRD
+#define SS_OUTPUT_REGISTER          PORTD
 
-typedef struct 
+#define SS_BIT_SENSOR1              4
+#define SS_BIT_SENSOR2              5
+
+
+typedef volatile struct 
 {
   bool signalOk;
   bool risingEdgeSeen;
@@ -30,7 +37,7 @@ typedef enum
   MOTOR_BRAKE
 } motorDrive_t;
 
-typedef struct
+typedef volatile struct
 {
   bool resetCycle;
 
@@ -51,6 +58,16 @@ typedef struct
   int activePwmDataForIsrIndex;
   PwmDataForIsr_t pwmData[2];
 } motor_t;
+
+
+typedef volatile struct
+{
+  uint32_t prevGlitchTs;
+  uint32_t prevRealChangeTs;
+  bool trackingLevel;
+  uint32_t detectedPulseInUs;  
+} speedSensorContext_t;
+
 
 
 void rcContextInitialize(int ch);
@@ -76,48 +93,132 @@ void setupRadioControlInput();
 void setupPwmTimer();
 void setupMotorOutputPins();
 
+void isrSpeedSensorCommon(const int ch, const bool risingEdge);
+void isrSpeedSensor0();
+void isrSpeedSensor1();
+uint32_t speedSensorRawValueGet(const int ch);
+uint32_t speedSensorRpmAbsGet(const int ch);
 
-PwmDataForIsr_t pwmDataForIsr[2] = {0};
-volatile rcContext_t rcContext[2];
+
+PwmDataForIsr_t pwmDataForIsr[2] = {};
+rcContext_t rcContext[2];
+speedSensorContext_t sensorContext[2];
 motor_t motor[2];
 uint32_t pulseCounter[2] = {0};
 bool pwmEnable = false;
 
 
-void DBGOUT_1_ON()
+void sensorContextInitialize(int ch)
 {
-  constexpr uint8_t mask = 1 << 4;
-  PORTD |= mask;
-}
-void DBGOUT_1_OFF()
-{
-  constexpr uint8_t mask = ~(1 << 4);
-  PORTD &= mask;
+  if(ch < 2)
+  {
+    speedSensorContext_t* c = &(sensorContext[ch]);
+    memset((void*)c, 0, sizeof(speedSensorContext_t));
+  }
 }
 
-void DBGOUT_2_ON()
+void sensorContextInitialize(void)
 {
-  constexpr uint8_t mask = 1 << 5;
-  PORTD |= mask;
-}
-void DBGOUT_2_OFF()
-{
-  constexpr uint8_t mask = ~(1 << 5);
-  PORTD &= mask;
+  sensorContextInitialize(0);
+  sensorContextInitialize(1);
 }
 
 
+void setupSpeedSensor()
+{
+  sensorContextInitialize();
+
+  pinMode(SS_BIT_SENSOR1, INPUT_PULLUP);
+  pinMode(SS_BIT_SENSOR2, INPUT_PULLUP);
+
+  /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
+  attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR1), isrSpeedSensor0, CHANGE);
+  attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR2), isrSpeedSensor1, CHANGE);
+
+}
+
+
+const uint32_t speedSensorMinimumPeriodInUs = 400; /*TODO: change this to be a function of requested speed*/
+
+void isrSpeedSensorCommon(const int ch)
+{
+  speedSensorContext_t* c = &(sensorContext[ch]);
+  uint32_t ts = micros();
+  const uint32_t pulseTime = ts - c->prevRealChangeTs;
+
+  c->detectedPulseInUs = pulseTime;
+  c->prevRealChangeTs = ts;
+}
+
+
+void isrSpeedSensor0()
+{
+  isrSpeedSensorCommon(0);
+}
+
+void isrSpeedSensor1()
+{
+  isrSpeedSensorCommon(1);
+}
+
+uint32_t speedSensorRawValueGet(const int ch)
+{
+  uint32_t val = 0;
+  speedSensorContext_t* c = &(sensorContext[ch]);
+  uint32_t pulseWidth = c->detectedPulseInUs;
+
+  /*clear after reading*/
+  c->detectedPulseInUs = 0;
+
+  val = pulseWidth;
+
+  return val;
+}
+
+uint32_t speedSensorRpmAbsGet(const int ch)
+{
+  constexpr uint32_t usInMilliSecond = 1000;
+  constexpr uint32_t usInSecond = usInMilliSecond * 1000;
+  constexpr uint32_t usInMinute = usInSecond * 60;
+  constexpr uint32_t cyclesPerRevolution = 2;
+  constexpr uint32_t dividend = usInMinute / cyclesPerRevolution;
+
+  uint32_t rpm = 0;
+  uint32_t pulseInUs = speedSensorRawValueGet(ch);
+
+  if(pulseInUs == 0)
+  {
+    rpm = 0;
+  }
+  else if(pulseInUs < 1000)
+  {
+    rpm = 30000;
+  }
+  else if(pulseInUs > 500000)
+  {
+    rpm = 60;
+  }
+  else
+  {
+    rpm = dividend / pulseInUs;
+  }
+
+  return rpm;
+}
 
 void rcContextInitialize(int ch)
 {
-  rcContext_t* c = &(rcContext[ch]);
-  memset(c, 0, sizeof(rcContext_t));
+  if(ch < 2)
+  {
+    rcContext_t* c = &(rcContext[ch]);
+    memset((void*)c, 0, sizeof(rcContext_t));
+  }
 }
 
 void rcContextInitialize(void)
 {
   rcContextInitialize(0);
-  rcContextInitialize(0);
+  rcContextInitialize(1);
 }
 
 void motorInitialize()
@@ -231,7 +332,6 @@ void motorEnable(int idx, bool enable)
 void monitorRcReceiverStatus()
 {
   static uint32_t prevTs = 0;
-  static uint32_t prevRcCounter = 0;
   uint32_t ts = millis();
   uint32_t age = ts-prevTs;
 
@@ -260,8 +360,8 @@ void monitorRcReceiverStatus()
 
 void initializePwm()
 {
-  memset(&(pwmDataForIsr[0]), 0, sizeof(PwmDataForIsr_t));
-  memset(&(pwmDataForIsr[1]), 0, sizeof(PwmDataForIsr_t));
+  memset((void*)&(pwmDataForIsr[0]), 0, sizeof(PwmDataForIsr_t));
+  memset((void*)&(pwmDataForIsr[1]), 0, sizeof(PwmDataForIsr_t));
 
   pwmDataForIsr[0].resetCycle = true;
   pwmDataForIsr[1].resetCycle = true;
@@ -275,11 +375,11 @@ void getMotorPwmValuesISR(int idx, PwmDataForIsr_t *pwmData)
   int activeIdx = m->activePwmDataForIsrIndex;
   PwmDataForIsr_t *activeData = &(m->pwmData[activeIdx]);
 
-  memcpy(pwmData, activeData, sizeof(PwmDataForIsr_t));
+  memcpy((void*)pwmData, (const void*)activeData, sizeof(PwmDataForIsr_t));
 }
 
-inline void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1) __attribute__((always_inline));
-void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1)
+inline void setMotorPinsISR(const int idx, volatile uint8_t &val0, volatile uint8_t &val1) __attribute__((always_inline));
+void setMotorPinsISR(const int idx, volatile uint8_t &val0, volatile uint8_t &val1)
 {
   //will fail if idx >= 2!
 
@@ -309,8 +409,6 @@ uint32_t timerCntr=0;
 ISR(TIMER2_COMPA_vect)
 {
   int m;
-
-  DBGOUT_1_ON();
 
   timerCntr++;
 
@@ -354,9 +452,6 @@ ISR(TIMER2_COMPA_vect)
       }      
     }
   }
-
-  DBGOUT_1_OFF();
-
 }
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
@@ -365,6 +460,7 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
   {
     return true;
   }
+
   return false;
 }
 
@@ -511,19 +607,16 @@ float calculateSteeringStrength(int16_t throttle)
   return pct;
 }
 
+static uint32_t prevRpm0, prevRpm1;
 
 
 void speedControl()
 {
-  bool ret = false;
-
-DBGOUT_2_ON();
-
   int16_t throttleInPercent = getThrottlePosition();
   int16_t directionInPercent = getSteeringDirection();
-
   int16_t outL = 0;
   int16_t outR = 0;
+
 
   if(throttleInPercent != 0)
   {
@@ -553,21 +646,27 @@ DBGOUT_2_ON();
 
   motorOutputUpdate();
 
-#if 1
-  Serial.print(directionInPercent);
-  Serial.print(",");
-  Serial.print(throttleInPercent);
-  Serial.print(",");
-  Serial.print(outL);
-  Serial.print(",");
-  Serial.print(outR);
-  Serial.println(",-100,100");
 
-#endif
-
-DBGOUT_2_OFF();  
   return;
 }
+
+
+void speedGovernor()
+{
+  uint32_t zaimRpm0 = speedSensorRpmAbsGet(0);
+  uint32_t zaimRpm1 = speedSensorRpmAbsGet(1);
+
+  //if((zaimRpm0 != prevRpm0) || (zaimRpm1 != prevRpm1))
+  {
+    Serial.println(zaimRpm1);
+    //Serial.println("RPM");
+  }
+
+  prevRpm0 = zaimRpm0;
+  prevRpm1 = zaimRpm1;
+}
+
+
 
 int16_t getBatteryLevel()
 {
@@ -582,9 +681,14 @@ void setupRadioControlInput()
 {
   rcContextInitialize();
 
+#if 0
   constexpr uint8_t mask = (1 << RC_BIT_DIRECTION) | (1 << RC_BIT_THROTTLE);
 
   RC_DIRECTION_REGISTER = RC_DIRECTION_REGISTER & (~mask);  //force chosen bits to zero = input
+#endif
+
+  pinMode(RC_BIT_DIRECTION, INPUT);
+  pinMode(RC_BIT_THROTTLE, INPUT);
 
   /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
   attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
@@ -594,6 +698,11 @@ void setupRadioControlInput()
 
 void setupPwmTimer(uint32_t hz)
 {
+  uint32_t prescalers[] = {1, 8, 32};
+  uint32_t chosenPrescaler = 0;
+  uint32_t val = 0;
+  int i;
+
   TCCR2A = 0;
   TCCR2B = 0;
 
@@ -617,11 +726,7 @@ void setupPwmTimer(uint32_t hz)
     (16M/hz) / prescaler = val+1
   */
 
-  uint32_t prescalers[] = {1, 8, 32};
-  uint32_t chosenPrescaler = 0;
-  uint32_t val = 0;
-
-  for(int i = 0; i<3; i++)
+  for(i = 0; i<3; i++)
   {
     val =  ((16000000 / hz) / prescalers[i]) -1;
 
@@ -651,15 +756,7 @@ void setupPwmTimer(uint32_t hz)
 
   OCR2A = val;
 
-#if 0
-  Serial.print("Prescaler=");
-  Serial.print(chosenPrescaler);
-  Serial.print(", OCR2A=");
-  Serial.print(OCR2A);
-  Serial.println(".");
-#endif
   // enable timer compare interrupt
-  ////////////////////////////////    ZAIM    ///////////////////////
   TIMSK2 |= (1 << OCIE2A);
 }
 
@@ -682,10 +779,7 @@ void setup()
 
   analogReference(INTERNAL);
 
-  pinMode(13, OUTPUT);
-
-  pinMode(4, OUTPUT);
-  pinMode(5, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
 
   setupMotorOutputPins();
 
@@ -693,21 +787,24 @@ void setup()
 
   initializePwm();
 
+
   cli();  /*disable*/
-  setupRadioControlInput();
+  setupSpeedSensor();
+
   setupPwmTimer(30000);
+  setupRadioControlInput();
   sei();  /*enable*/
 }
-
-
 
 void loop()
 {
   speedControl();
+////////////////////////////////// ZAIM  monitorRcReceiverStatus();
 
-  monitorRcReceiverStatus();
+  speedGovernor();
 
-  delay(20);
+  //while(1) 
+  delay(100);
 }
 
 
