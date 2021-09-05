@@ -18,6 +18,8 @@
 #define SS_BIT_SENSOR2              5
 
 
+#define MOTOR_VALUE_DIVIDER         10    /*1=values go 0...100. 10=values go 0...1000*/
+
 typedef volatile struct 
 {
   bool signalOk;
@@ -192,9 +194,11 @@ void motorOutputUpdate()
     }
 
     int16_t pwmAbs = abs(mv);
-    uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
+//    uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
+    uint16_t tw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 200, 100);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
 //    uint16_t tw = map(pwmAbs, 0, 100, 200, 40);   /*30kHz ISR -> xxxHz at highest throttle, yyyHz at lowest*/
-    uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
+//    uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
+    uint16_t aw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 0, tw);
 
     switch(drv)
     {
@@ -585,14 +589,14 @@ void speedControl()
     int16_t outL = 0;
     int16_t outR = 0;
 
-#if 0
+#if 1
     /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
     /*ZAIM*/directionInPercent = 0;
 #endif
 
     if(throttleInPercent != 0)
     {
-      int16_t primaryMotor = throttleInPercent;
+      int16_t primaryMotor = throttleInPercent * 10;
 
       /*calculate value for the "another" motor*/
 
@@ -647,14 +651,14 @@ void speedAdjust(int16_t& outR, int16_t& outL)
     if(eights != 0) /*zero would cause division by zero*/
     {
       float measuredRPS = (float)eights;
-      float requestedRPS = (float)reqInAbs * 3.0;   /*reqInAbs is in percents: 1...100. The motor max is 18kRPM=300RPS.*/
+      float requestedRPS = (float)((reqInAbs * 3.0) / (float)MOTOR_VALUE_DIVIDER);   /*reqInAbs is in promilles: 1...100. The motor max is 18kRPM=300RPS.*/
       float adj;
 
       adj = requestedRPS / measuredRPS;
 
 #if 1
-      if(adj > 2) 
-        adj = 2;
+      if(adj > 4) 
+        adj = 4;
       else if(adj < 0.5)
         adj = 0.5;
 #endif
@@ -664,13 +668,13 @@ void speedAdjust(int16_t& outR, int16_t& outL)
 #if 1
       if(ch==1)
       {
-        Serial.print(outL);
+        Serial.print(reqInAbs / (float)MOTOR_VALUE_DIVIDER);
         Serial.print(",");
         Serial.print(measuredRPS / 3.0);
         Serial.print(",");
         Serial.print(adjFactor[1]);
         Serial.print(",");
-        Serial.print((int16_t)((float)outL) * adjFactor[1]);
+        Serial.print((((float)outL) * adjFactor[1]) / (float)MOTOR_VALUE_DIVIDER);
         Serial.println(",0,10");
       }
 #endif
@@ -679,7 +683,16 @@ void speedAdjust(int16_t& outR, int16_t& outL)
     {
       if(reqInAbs > 0)
       {
-        adjFactor[ch] = (float)(map(reqInAbs, 1, 100, 100, 10)) / 10.0;  /*stalled rotor, give it a starting push*/
+//        adjFactor[ch] = (float)(map(reqInAbs, 0, 100 * MOTOR_VALUE_DIVIDER, 50, 10)) / 10.0;  /*stalled rotor, give it a starting push*/
+        adjFactor[ch] = (20.0 / (float)reqInAbs);  /*stalled rotor, give it a starting push*/
+        if(adjFactor[ch] < 1.0) 
+        {
+          adjFactor[ch] = 1.5;
+        }
+      }
+      else
+      {
+        adjFactor[ch] = 1.0;
       }
     }
   }
@@ -837,7 +850,7 @@ void setup()
   cli();  /*disable*/
   setupSpeedSensor();
   setupspeedAdjustTimer();
-  setupPwmTimer(30000);
+  setupPwmTimer(40000);
   setupRadioControlInput();
   sei();  /*enable*/
 }
