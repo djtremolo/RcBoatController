@@ -60,15 +60,6 @@ typedef struct
 } motor_t;
 
 
-typedef volatile struct
-{
-  uint32_t prevGlitchTs;
-  uint32_t prevRealChangeTs;
-  bool trackingLevel;
-  uint32_t detectedPulseInUs;  
-} speedSensorContext_t;
-
-
 
 void rcContextInitialize(int ch);
 void rcContextInitialize(void);
@@ -99,28 +90,27 @@ void isrSpeedSensor1();
 uint32_t speedSensorRawValueGet(const int ch);
 uint32_t speedSensorRpmAbsGet(const int ch);
 
+void speedAdjust(int16_t& outR, int16_t& outL);
+
 
 PwmDataForIsr_t pwmDataForIsr[2] = {};
 rcContext_t rcContext[2];
-speedSensorContext_t sensorContext[2];
+volatile uint32_t speedSensorTicks[2];
+volatile uint32_t speedSensorEighthsOfRevolution[2];
+volatile uint32_t speedSensorSeqNo;   /*incremented each time the RPS values have been updated. Used for synchronizing the speedAdjust.*/
 motor_t motor[2];
 uint32_t pulseCounter[2] = {0};
 bool pwmEnable = false;
 
+volatile uint32_t sgTimerCntr = 0;
+volatile uint32_t pwmTimerCntr = 0;
 
-void sensorContextInitialize(int ch)
-{
-  if(ch < 2)
-  {
-    speedSensorContext_t* c = &(sensorContext[ch]);
-    memset((void*)c, 0, sizeof(speedSensorContext_t));
-  }
-}
 
 void sensorContextInitialize(void)
 {
-  sensorContextInitialize(0);
-  sensorContextInitialize(1);
+  speedSensorTicks[0] = 0;
+  speedSensorTicks[1] = 0;
+  speedSensorSeqNo = 0;
 }
 
 
@@ -138,18 +128,11 @@ void setupSpeedSensor()
 }
 
 
-const uint32_t speedSensorMinimumPeriodInUs = 400; /*TODO: change this to be a function of requested speed*/
-
 void isrSpeedSensorCommon(const int ch)
 {
-  speedSensorContext_t* c = &(sensorContext[ch]);
-  uint32_t ts = micros();
-  const uint32_t pulseTime = ts - c->prevRealChangeTs;
-
-  c->detectedPulseInUs = pulseTime;
-  c->prevRealChangeTs = ts;
+  /*here, let's just increment a tick counter. Timer1 ISR will read the counter at 500ms interval and convert it to RPM.*/
+  speedSensorTicks[ch]++; 
 }
-
 
 void isrSpeedSensor0()
 {
@@ -159,51 +142,6 @@ void isrSpeedSensor0()
 void isrSpeedSensor1()
 {
   isrSpeedSensorCommon(1);
-}
-
-uint32_t speedSensorRawValueGet(const int ch)
-{
-  uint32_t val = 0;
-  speedSensorContext_t* c = &(sensorContext[ch]);
-  uint32_t pulseWidth = c->detectedPulseInUs;
-
-  /*clear after reading*/
-  c->detectedPulseInUs = 0;
-
-  val = pulseWidth;
-
-  return val;
-}
-
-uint32_t speedSensorRpmAbsGet(const int ch)
-{
-  constexpr uint32_t usInMilliSecond = 1000;
-  constexpr uint32_t usInSecond = usInMilliSecond * 1000;
-  constexpr uint32_t usInMinute = usInSecond * 60;
-  constexpr uint32_t cyclesPerRevolution = 2;
-  constexpr uint32_t dividend = usInMinute / cyclesPerRevolution;
-
-  uint32_t rpm = 0;
-  uint32_t pulseInUs = speedSensorRawValueGet(ch);
-
-  if(pulseInUs == 0)
-  {
-    rpm = 0;
-  }
-  else if(pulseInUs < 1000)
-  {
-    rpm = 30000;
-  }
-  else if(pulseInUs > 500000)
-  {
-    rpm = 60;
-  }
-  else
-  {
-    rpm = dividend / pulseInUs;
-  }
-
-  return rpm;
 }
 
 void rcContextInitialize(int ch)
@@ -255,6 +193,7 @@ void motorOutputUpdate()
 
     int16_t pwmAbs = abs(mv);
     uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
+//    uint16_t tw = map(pwmAbs, 0, 100, 200, 40);   /*30kHz ISR -> xxxHz at highest throttle, yyyHz at lowest*/
     uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
 
     switch(drv)
@@ -404,13 +343,11 @@ void setMotorPinsISR(const int idx, volatile uint8_t &val0, volatile uint8_t &va
   }
 }
 
-uint32_t timerCntr=0;
-
 ISR(TIMER2_COMPA_vect)
 {
   int m;
 
-  timerCntr++;
+  pwmTimerCntr++;
 
   for(m = 0; m < 2; m++)
   {
@@ -453,6 +390,31 @@ ISR(TIMER2_COMPA_vect)
     }
   }
 }
+
+
+ISR(TIMER1_COMPA_vect) 
+{
+  int ch;
+  volatile uint32_t ctr[2];
+  static uint32_t prevCtr[2] = {};
+
+  ctr[0] = speedSensorTicks[0];
+  ctr[1] = speedSensorTicks[1];
+
+  sgTimerCntr++;
+
+  for(ch = 0; ch < 2; ch++)
+  {
+    speedSensorEighthsOfRevolution[ch] = ctr[ch] - prevCtr[ch];
+  }
+
+  prevCtr[0] = ctr[0];
+  prevCtr[1] = ctr[1];
+  
+  /*inform speedAdjust (it must be updated at less than 125ms interval to be able to catch changes. Recommended 60ms or less.*/
+  speedSensorSeqNo++;
+}
+
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 {
@@ -612,58 +574,122 @@ static uint32_t prevRpm0, prevRpm1;
 
 void speedControl()
 {
-  int16_t throttleInPercent = getThrottlePosition();
-  int16_t directionInPercent = getSteeringDirection();
-  int16_t outL = 0;
-  int16_t outR = 0;
+  volatile uint32_t seqNo = speedSensorSeqNo;
+  static uint32_t prevSeqNo = 0;
 
-
-  if(throttleInPercent != 0)
+  /*check if 125ms timer tick has passed*/
+  if(seqNo != prevSeqNo)
   {
-    int16_t primaryMotor = throttleInPercent;
+    int16_t throttleInPercent = getThrottlePosition();
+    int16_t directionInPercent = getSteeringDirection();
+    int16_t outL = 0;
+    int16_t outR = 0;
 
-    /*calculate value for the "another" motor*/
+#if 0
+    /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
+    /*ZAIM*/directionInPercent = 0;
+#endif
 
-    int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
-
-    if(directionInPercent < 0)
+    if(throttleInPercent != 0)
     {
-      /*steering left*/
-      outL = secondaryMotor;
-      outR = primaryMotor;
+      int16_t primaryMotor = throttleInPercent;
+
+      /*calculate value for the "another" motor*/
+
+      int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
+
+      if(directionInPercent < 0)
+      {
+        /*steering left*/
+        outL = secondaryMotor;
+        outR = primaryMotor;
+      }
+      else
+      {
+        /*steering right*/
+        outL = primaryMotor;
+        outR = secondaryMotor;
+      }
     }
-    else
-    {
-      /*steering right*/
-      outL = primaryMotor;
-      outR = secondaryMotor;
-    }
+
+    speedAdjust(outR, outL);
+
+    motorValueSet(0, 0);  //ZAIM outR);
+    motorValueSet(1, outL);
+
+    motorOutputUpdate();
+
+    prevSeqNo = seqNo;
   }
-
-
-  motorValueSet(0, outR);
-  motorValueSet(1, outL);
-
-  motorOutputUpdate();
-
 
   return;
 }
 
 
-void speedGovernor()
+void speedAdjust(int16_t& outR, int16_t& outL)
 {
-  uint32_t zaimRpm0 = speedSensorRpmAbsGet(0);
-  uint32_t zaimRpm1 = speedSensorRpmAbsGet(1);
+  static float adjFactor[2] = {1.0, 1.0};
+  static int16_t prevReqInAbs[2] = {};
+  int ch;
+    
+  /*
+  ch: 0 = R
+      1 = L
+  */
 
-  //if((zaimRpm0 != prevRpm0) || (zaimRpm1 != prevRpm1))
+  for(ch = 0; ch < 2; ch++)
   {
-    Serial.println(zaimRpm1);
-    //Serial.println("RPM");
+    uint32_t eights = speedSensorEighthsOfRevolution[ch];
+    int16_t reqInAbs = prevReqInAbs[ch];
+
+    /*note: this part will be triggered by 125ms (one eighth of a second). When the encoder reports one tick, it corresponds to one Revolution Per Second (RPS). Similarly, 100 ticks -> 100RPS = 6000RPM.*/
+
+    if(eights != 0) /*zero would cause division by zero*/
+    {
+      float measuredRPS = (float)eights;
+      float requestedRPS = (float)reqInAbs * 3.0;   /*reqInAbs is in percents: 1...100. The motor max is 18kRPM=300RPS.*/
+      float adj;
+
+      adj = requestedRPS / measuredRPS;
+
+#if 1
+      if(adj > 2) 
+        adj = 2;
+      else if(adj < 0.5)
+        adj = 0.5;
+#endif
+
+      adjFactor[ch] = adj;
+
+#if 1
+      if(ch==1)
+      {
+        Serial.print(outL);
+        Serial.print(",");
+        Serial.print(measuredRPS / 3.0);
+        Serial.print(",");
+        Serial.print(adjFactor[1]);
+        Serial.print(",");
+        Serial.print((int16_t)((float)outL) * adjFactor[1]);
+        Serial.println(",0,10");
+      }
+#endif
+    }
+    else
+    {
+      if(reqInAbs > 0)
+      {
+        adjFactor[ch] = (float)(map(reqInAbs, 1, 100, 100, 10)) / 10.0;  /*stalled rotor, give it a starting push*/
+      }
+    }
   }
 
-  prevRpm0 = zaimRpm0;
-  prevRpm1 = zaimRpm1;
+  outR = (int16_t)round(((float)outR) * adjFactor[0]);
+  outL = (int16_t)round(((float)outL) * adjFactor[1]);
+
+  prevReqInAbs[0] = abs(outR);
+  prevReqInAbs[1] = abs(outL);
+
 }
 
 
@@ -693,6 +719,26 @@ void setupRadioControlInput()
   /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
   attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
   attachInterrupt(digitalPinToInterrupt(RC_BIT_THROTTLE), isrThrottleSignalChange, CHANGE);
+}
+
+
+
+
+void setupspeedAdjustTimer() 
+{
+  // Clear registers
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+
+  // 8 Hz (16000000/((31249+1)*64))
+  OCR1A = 31249;
+  // CTC
+  TCCR1B |= (1 << WGM12);
+  // Prescaler 64
+  TCCR1B |= (1 << CS11) | (1 << CS10);
+  // Output Compare Match A Interrupt Enable
+  TIMSK1 |= (1 << OCIE1A);
 }
 
 
@@ -790,7 +836,7 @@ void setup()
 
   cli();  /*disable*/
   setupSpeedSensor();
-
+  setupspeedAdjustTimer();
   setupPwmTimer(30000);
   setupRadioControlInput();
   sei();  /*enable*/
@@ -799,12 +845,9 @@ void setup()
 void loop()
 {
   speedControl();
-////////////////////////////////// ZAIM  monitorRcReceiverStatus();
+///////////////////////////////// ZAIM  monitorRcReceiverStatus();
 
-  speedGovernor();
-
-  //while(1) 
-  delay(100);
+  delay(10);
 }
 
 
