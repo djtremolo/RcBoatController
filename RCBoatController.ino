@@ -494,6 +494,17 @@ bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
 {
   bool ret = false;
 
+/*
+TODO: RC input filtering
+- rc pulses at 16ms interval, control at 125ms interval -> 7.8 rc pulses during a cycle. Use 4 of them to give some margin.
+- make isr feed pulses into a ring buffer of 4 values
+- make reader to check cyclewidth once and calculate avg over the full buffer (order does not matter)
+- since the values are updated at single write at ISR, there's no need to lock the buffer for reading
+- use avg of four most recent readings for control
+*/
+
+
+
   if(ch < 2)
   {
     rcContext_t *c = &(rcContext[ch]);
