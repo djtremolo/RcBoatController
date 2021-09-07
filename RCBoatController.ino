@@ -20,15 +20,17 @@
 
 #define MOTOR_VALUE_DIVIDER         10    /*1=values go 0...100. 10=values go 0...1000*/
 
+constexpr int rcFilterBufferSize = 6;
+
 typedef volatile struct 
 {
   bool signalOk;
   bool risingEdgeSeen;
   bool fallingEdgeSeen;
   uint32_t prevRisingTs;
-  uint32_t prevFallingTs;
   uint32_t cycleWidth;
-  uint32_t pulseWidth;
+  uint32_t pulseWidthArray[rcFilterBufferSize];
+  int bufIndex;
 } rcContext_t;
 
 typedef enum
@@ -73,20 +75,18 @@ void monitorRcReceiverStatus();
 void initializePwm();
 void getMotorPwmValuesISR(int idx, PwmDataForIsr_t *pwmData);
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted);
-void isrRcIncomingPulse(rcContext_t* c, int pin);
+void isrRcIncomingPulse(rcContext_t* c, int pin, const uint32_t ts);
 void isrDirectionSignalChange();
 void isrThrottleSignalChange();
-bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth);
+bool getData(uint32_t ch, uint32_t *pulseWidth);
 int16_t getSteeringDirection();
 int16_t getThrottlePosition();
-float calculateSteeringStrength(int16_t throttle);
 void speedControl();
 int16_t getBatteryLevel();
 void setupRadioControlInput();
 void setupPwmTimer();
 void setupMotorOutputPins();
 
-void isrSpeedSensorCommon(const int ch, const bool risingEdge);
 void isrSpeedSensor0();
 void isrSpeedSensor1();
 uint32_t speedSensorRawValueGet(const int ch);
@@ -129,21 +129,14 @@ void setupSpeedSensor()
 
 }
 
-
-void isrSpeedSensorCommon(const int ch)
-{
-  /*here, let's just increment a tick counter. Timer1 ISR will read the counter at 500ms interval and convert it to RPM.*/
-  speedSensorTicks[ch]++; 
-}
-
 void isrSpeedSensor0()
 {
-  isrSpeedSensorCommon(0);
+  speedSensorTicks[0]++;
 }
 
 void isrSpeedSensor1()
 {
-  isrSpeedSensorCommon(1);
+  speedSensorTicks[1]++;
 }
 
 void rcContextInitialize(int ch)
@@ -194,10 +187,7 @@ void motorOutputUpdate()
     }
 
     int16_t pwmAbs = abs(mv);
-//    uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
-    uint16_t tw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 200, 100);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
-//    uint16_t tw = map(pwmAbs, 0, 100, 200, 40);   /*30kHz ISR -> xxxHz at highest throttle, yyyHz at lowest*/
-//    uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
+    uint16_t tw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 100, 50);   /*40kHz ISR -> 800Hz at highest throttle, 400Hz at lowest*/
     uint16_t aw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 0, tw);
 
     switch(drv)
@@ -258,7 +248,19 @@ void motorValueSet(int idx, int16_t valueInPercent)
   if(idx < 2)
   {
     motor_t *m = &(motor[idx]);
-    m->value = valueInPercent; //map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
+    constexpr int16_t posMax = 100 * MOTOR_VALUE_DIVIDER;
+    constexpr int16_t negMax = -posMax;
+
+    if(valueInPercent > posMax)
+    {
+      valueInPercent = posMax;
+    }
+    else if(valueInPercent < negMax)
+    {
+      valueInPercent = negMax;
+    }
+
+    m->value = valueInPercent;
   }
 }
 
@@ -433,9 +435,8 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 uint32_t rcCntr = 0;
 
 
-void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
+void isrRcIncomingPulse(const int ch, const uint8_t pinMask, const uint32_t ts)
 {
-  uint32_t ts = micros();
   bool rising = ((PIND & pinMask) == 0 ? false : true);
   rcContext_t* c = &(rcContext[ch]);
 
@@ -458,11 +459,11 @@ void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
     if(c->signalOk)
     {
       /*calculate pulse width*/
-      c->pulseWidth = ts - c->prevRisingTs;
+      c->pulseWidthArray[c->bufIndex] = ts - c->prevRisingTs;
+      c->bufIndex = (c->bufIndex < (rcFilterBufferSize-1) ? c->bufIndex + 1 : 0);
     }
 
     /*remember context information*/
-    c->prevFallingTs = ts;
     c->fallingEdgeSeen = true;
   }
 
@@ -480,43 +481,49 @@ void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
 
 void isrDirectionSignalChange()
 {
+  const uint32_t ts = micros();
   constexpr uint8_t pinMask = 1 << RC_BIT_DIRECTION;
-  isrRcIncomingPulse(0, pinMask);
+  isrRcIncomingPulse(0, pinMask, ts);
 }
 
 void isrThrottleSignalChange()
 {
+  const uint32_t ts = micros();
   constexpr uint8_t pinMask = 1 << RC_BIT_THROTTLE;
-  isrRcIncomingPulse(1, pinMask);
+  isrRcIncomingPulse(1, pinMask, ts);
 }
 
-bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
+uint32_t getFilteredPulseWidth(rcContext_t *c)
+{
+  int i;
+  uint32_t sum = 0;
+
+  for(i = 0; i < rcFilterBufferSize; i++)
+  {
+    sum += c->pulseWidthArray[i];
+  }
+
+  return round((float)sum / rcFilterBufferSize);
+}
+
+bool getData(uint32_t ch, uint32_t *pulseWidth)
 {
   bool ret = false;
-
-/*
-TODO: RC input filtering
-- rc pulses at 16ms interval, control at 125ms interval -> 7.8 rc pulses during a cycle. Use 4 of them to give some margin.
-- make isr feed pulses into a ring buffer of 4 values
-- make reader to check cyclewidth once and calculate avg over the full buffer (order does not matter)
-- since the values are updated at single write at ISR, there's no need to lock the buffer for reading
-- use avg of four most recent readings for control
-*/
-
-
 
   if(ch < 2)
   {
     rcContext_t *c = &(rcContext[ch]);
+    uint32_t pwAvg;
+
+    pwAvg = getFilteredPulseWidth(c);
 
     if(c->signalOk
         && checkRange(c->cycleWidth, 15000, 18000)
-        && checkRange(c->pulseWidth, 0, c->cycleWidth)
+        && checkRange(pwAvg, 0, c->cycleWidth)
     )
     {
       /*TODO: the reading should be atomic*/
-      *pulseWidth = c->pulseWidth;
-      *cycleWidth = c->cycleWidth;
+      *pulseWidth = pwAvg;
       ret = true;
     }
   }
@@ -527,9 +534,9 @@ TODO: RC input filtering
 int16_t getSteeringDirection()
 {
   int16_t steeringDirection = 0;
-  uint32_t pw, cw;
+  uint32_t pw;
 
-  if(getData(0, &pw, &cw))
+  if(getData(0, &pw))
   {
     int32_t dir = (int32_t)map(pw, 1110, 2064, -100, 100);
 
@@ -548,7 +555,7 @@ int16_t getThrottlePosition()
   int16_t throttlePosition = 0;
   uint32_t pw, cw;
 
-  if(getData(1, &pw, &cw))
+  if(getData(1, &pw))
   {
     //min:1136
     //max:2088
@@ -565,7 +572,7 @@ int16_t getThrottlePosition()
       tp = (int32_t)map(pw, 1572, 2088, 0, 100);
     }
 
-    if(abs(tp) < 5) tp = 0;
+    if(abs(tp) < 2) tp = 0;
     else if(tp > 100) tp = 100;
     else if(tp < -100) tp = -100;
 
@@ -574,18 +581,6 @@ int16_t getThrottlePosition()
 
   return throttlePosition;
 }
-
-float calculateSteeringStrength(int16_t throttle)
-{
-  float pct;
-
-  pct = (5.0 / (abs(throttle) / 10.0));
-
-  return pct;
-}
-
-static uint32_t prevRpm0, prevRpm1;
-
 
 void speedControl()
 {
@@ -600,7 +595,16 @@ void speedControl()
     int16_t outL = 0;
     int16_t outR = 0;
 
-#if 1
+
+#if 0
+    Serial.print(throttleInPercent);
+    Serial.print(",");
+    Serial.print(directionInPercent);
+    Serial.println(",0,100");
+#endif
+
+
+#if 0
     /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
     /*ZAIM*/directionInPercent = 0;
 #endif
@@ -656,47 +660,34 @@ void speedAdjust(int16_t& outR, int16_t& outL)
   {
     uint32_t eights = speedSensorEighthsOfRevolution[ch];
     int16_t reqInAbs = prevReqInAbs[ch];
+    float measuredRPS = (float)eights;
+    float requestedRPS = (float)((reqInAbs * 3.0) / (float)MOTOR_VALUE_DIVIDER);   /*reqInAbs is in promilles: 1...1000. The motor max is 18kRPM=300RPS.*/
 
     /*note: this part will be triggered by 125ms (one eighth of a second). When the encoder reports one tick, it corresponds to one Revolution Per Second (RPS). Similarly, 100 ticks -> 100RPS = 6000RPM.*/
 
-    if(eights != 0) /*zero would cause division by zero*/
+    if(eights != 0)
     {
-      float measuredRPS = (float)eights;
-      float requestedRPS = (float)((reqInAbs * 3.0) / (float)MOTOR_VALUE_DIVIDER);   /*reqInAbs is in promilles: 1...100. The motor max is 18kRPM=300RPS.*/
-      float adj;
+      float adj = 4.0;
 
+      /*if not stalled, then calculate factor. Otherwise, use default factor to push the motor a bit*/
       adj = requestedRPS / measuredRPS;
 
-#if 1
       if(adj > 4) 
         adj = 4;
       else if(adj < 0.5)
         adj = 0.5;
-#endif
 
       adjFactor[ch] = adj;
-
-#if 1
-      if(ch==1)
-      {
-        Serial.print(reqInAbs / (float)MOTOR_VALUE_DIVIDER);
-        Serial.print(",");
-        Serial.print(measuredRPS / 3.0);
-        Serial.print(",");
-        Serial.print(adjFactor[1]);
-        Serial.print(",");
-        Serial.print((((float)outL) * adjFactor[1]) / (float)MOTOR_VALUE_DIVIDER);
-        Serial.println(",0,10");
-      }
-#endif
+ 
     }
+#if 0
     else
     {
       if(reqInAbs > 0)
       {
 //        adjFactor[ch] = (float)(map(reqInAbs, 0, 100 * MOTOR_VALUE_DIVIDER, 50, 10)) / 10.0;  /*stalled rotor, give it a starting push*/
         adjFactor[ch] = (20.0 / (float)reqInAbs);  /*stalled rotor, give it a starting push*/
-        if(adjFactor[ch] < 1.0) 
+        if(adjFactor[ch] < 1.5)
         {
           adjFactor[ch] = 1.5;
         }
@@ -706,11 +697,34 @@ void speedAdjust(int16_t& outR, int16_t& outL)
         adjFactor[ch] = 1.0;
       }
     }
+#endif    
+
+#if 1
+    if(ch==1)
+    {
+      //Serial.print(reqInAbs / (float)MOTOR_VALUE_DIVIDER);
+
+      Serial.print(requestedRPS);
+      Serial.print(",");
+      Serial.print(measuredRPS);
+      Serial.print(",");
+      Serial.print(adjFactor[1]);
+      Serial.print(",");
+      Serial.print(round((((float)outL) * adjFactor[1]) / (float)MOTOR_VALUE_DIVIDER));
+      Serial.println(",0,10");
+    }
+  #endif
+
+
   }
 
+
+
+
+#if 1 ///////////ZAIM
   outR = (int16_t)round(((float)outR) * adjFactor[0]);
   outL = (int16_t)round(((float)outL) * adjFactor[1]);
-
+#endif ///////////ZAIM
   prevReqInAbs[0] = abs(outR);
   prevReqInAbs[1] = abs(outL);
 
