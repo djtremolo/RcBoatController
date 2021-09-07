@@ -18,8 +18,6 @@
 #define SS_BIT_SENSOR2              5
 
 
-#define MOTOR_VALUE_DIVIDER         10    /*1=values go 0...100. 10=values go 0...1000*/
-
 constexpr int rcFilterBufferSize = 6;
 
 typedef volatile struct 
@@ -82,7 +80,8 @@ bool getData(uint32_t ch, uint32_t *pulseWidth);
 int16_t getSteeringDirection();
 int16_t getThrottlePosition();
 void speedControl();
-int16_t getBatteryLevel();
+int16_t getBatteryLevelInMilliVolts();
+int16_t getBatteryLevelInPercents();
 void setupRadioControlInput();
 void setupPwmTimer();
 void setupMotorOutputPins();
@@ -187,8 +186,8 @@ void motorOutputUpdate()
     }
 
     int16_t pwmAbs = abs(mv);
-    uint16_t tw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 100, 50);   /*40kHz ISR -> 800Hz at highest throttle, 400Hz at lowest*/
-    uint16_t aw = map(pwmAbs, 0, 100*MOTOR_VALUE_DIVIDER, 0, tw);
+    uint16_t tw = 100;//map(pwmAbs, 0, 100, 100, 40);   /*40kHz ISR -> 1000Hz at highest throttle, 400Hz at lowest*/
+    uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
 
     switch(drv)
     {
@@ -248,7 +247,7 @@ void motorValueSet(int idx, int16_t valueInPercent)
   if(idx < 2)
   {
     motor_t *m = &(motor[idx]);
-    constexpr int16_t posMax = 100 * MOTOR_VALUE_DIVIDER;
+    constexpr int16_t posMax = 100;
     constexpr int16_t negMax = -posMax;
 
     if(valueInPercent > posMax)
@@ -572,7 +571,7 @@ int16_t getThrottlePosition()
       tp = (int32_t)map(pw, 1572, 2088, 0, 100);
     }
 
-    if(abs(tp) < 2) tp = 0;
+    if(abs(tp) < 5) tp = 0;
     else if(tp > 100) tp = 100;
     else if(tp < -100) tp = -100;
 
@@ -605,13 +604,18 @@ void speedControl()
 
 
 #if 0
+    throttleInPercent /= 5;
+#endif
+
+
+#if 0
     /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
     /*ZAIM*/directionInPercent = 0;
 #endif
 
     if(throttleInPercent != 0)
     {
-      int16_t primaryMotor = throttleInPercent * 10;
+      int16_t primaryMotor = throttleInPercent;
 
       /*calculate value for the "another" motor*/
 
@@ -645,11 +649,15 @@ void speedControl()
 }
 
 
+constexpr int motorMaxRps = 250;
+constexpr float motorPctToRpsFactor = (float)motorMaxRps / 100.0;
+
 void speedAdjust(int16_t& outR, int16_t& outL)
 {
   static float adjFactor[2] = {1.0, 1.0};
   static int16_t prevReqInAbs[2] = {};
   int ch;
+  const int16_t newReqInAbs[2] = {abs(outR), abs(outL)};
     
   /*
   ch: 0 = R
@@ -658,73 +666,83 @@ void speedAdjust(int16_t& outR, int16_t& outL)
 
   for(ch = 0; ch < 2; ch++)
   {
+    /*note: this part will be triggered by 125ms (one eighth of a second). When the encoder reports one tick, it corresponds to one Revolution Per Second (RPS). Similarly, 100 ticks -> 100RPS = 6000RPM.*/
     uint32_t eights = speedSensorEighthsOfRevolution[ch];
     int16_t reqInAbs = prevReqInAbs[ch];
     float measuredRPS = (float)eights;
-    float requestedRPS = (float)((reqInAbs * 3.0) / (float)MOTOR_VALUE_DIVIDER);   /*reqInAbs is in promilles: 1...1000. The motor max is 18kRPM=300RPS.*/
+    float requestedRPS = (float)reqInAbs * motorPctToRpsFactor;   /*reqInAbs is in percents: 1...100. The motor max is more than 250RPS with no load but we want to keep some reserve for water resistance.*/
+    float adj = 1.0;
+    float newReq = (float)newReqInAbs[ch] * motorPctToRpsFactor;
+    float reqFlt = (requestedRPS + newReq) / 2.0;   /*average prev and new to react smoother*/
 
-    /*note: this part will be triggered by 125ms (one eighth of a second). When the encoder reports one tick, it corresponds to one Revolution Per Second (RPS). Similarly, 100 ticks -> 100RPS = 6000RPM.*/
+    float refUsedInCalculations = reqFlt;//requestedRPS;
 
     if(eights != 0)
     {
-      float adj = 4.0;
-
-      /*if not stalled, then calculate factor. Otherwise, use default factor to push the motor a bit*/
-      adj = requestedRPS / measuredRPS;
-
-      if(adj > 4) 
-        adj = 4;
-      else if(adj < 0.5)
-        adj = 0.5;
-
-      adjFactor[ch] = adj;
- 
+      adj = refUsedInCalculations / measuredRPS;
     }
-#if 0
     else
     {
-      if(reqInAbs > 0)
+      /*no movement detected, check if movement was requested*/
+      if(refUsedInCalculations > 0)
       {
-//        adjFactor[ch] = (float)(map(reqInAbs, 0, 100 * MOTOR_VALUE_DIVIDER, 50, 10)) / 10.0;  /*stalled rotor, give it a starting push*/
-        adjFactor[ch] = (20.0 / (float)reqInAbs);  /*stalled rotor, give it a starting push*/
-        if(adjFactor[ch] < 1.5)
-        {
-          adjFactor[ch] = 1.5;
-        }
-      }
-      else
-      {
-        adjFactor[ch] = 1.0;
+        /*req>0 and eighths==0 -> stalled. Give the motor a push to get it rotating.*/
+        adj = 2.0;  //((float)map(reqFlt, 0, 100, 40, 10)) / 10.0;
       }
     }
-#endif    
 
-#if 1
+    /*limit*/
+    if(adj > 3.0)
+      adj = 3.0;
+    else if(adj < 0.5)
+      adj = 0.5;
+
+    adjFactor[ch] = adj;
+
+#if 0
     if(ch==1)
     {
-      //Serial.print(reqInAbs / (float)MOTOR_VALUE_DIVIDER);
-
+      Serial.print(outL);
+      Serial.print(",");
       Serial.print(requestedRPS);
       Serial.print(",");
       Serial.print(measuredRPS);
       Serial.print(",");
       Serial.print(adjFactor[1]);
       Serial.print(",");
-      Serial.print(round((((float)outL) * adjFactor[1]) / (float)MOTOR_VALUE_DIVIDER));
+      Serial.print(round(((float)outL) * adjFactor[1]));
       Serial.println(",0,10");
     }
   #endif
-
-
+#if 1
+    if(ch==1)
+    {
+      Serial.print(getBatteryLevelInPercents());
+      Serial.print(",");
+      Serial.print(requestedRPS);
+      Serial.print(",");
+      Serial.print(measuredRPS);
+      Serial.print(",");
+      Serial.print(adjFactor[1]*100.0);
+    }
+  #endif
   }
 
 
 
 
-#if 1 ///////////ZAIM
+#if 0 ///////////ZAIM
   outR = (int16_t)round(((float)outR) * adjFactor[0]);
   outL = (int16_t)round(((float)outL) * adjFactor[1]);
 #endif ///////////ZAIM
+
+  Serial.print(",");
+  Serial.print(outL);
+  Serial.println(",0,400");
+
+
+
+
   prevReqInAbs[0] = abs(outR);
   prevReqInAbs[1] = abs(outL);
 
@@ -732,7 +750,7 @@ void speedAdjust(int16_t& outR, int16_t& outL)
 
 
 
-int16_t getBatteryLevel()
+int16_t getBatteryLevelInMilliVolts()
 {
   int32_t bvRaw = analogRead(A4);
   constexpr int32_t factorToMicroVolts = 1074 * (8500 / 1060);
@@ -740,6 +758,12 @@ int16_t getBatteryLevel()
 
   return bvMilliVolts;
 }
+
+int16_t getBatteryLevelInPercents()
+{
+  return (getBatteryLevelInMilliVolts() * 100) / 8000;
+}
+
 
 void setupRadioControlInput()
 {
@@ -883,7 +907,7 @@ void setup()
 void loop()
 {
   speedControl();
-///////////////////////////////// ZAIM  monitorRcReceiverStatus();
+  monitorRcReceiverStatus();
 
   delay(10);
 }
