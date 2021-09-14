@@ -1,6 +1,6 @@
-#include "Arduino.h"
 #include <stdint.h>
-
+#include "Arduino.h"
+#include "PinChangeInterrupt.h"
 
 #define RC_INPUT_REGISTER           PIND
 #define RC_DIRECTION_REGISTER       DDRD
@@ -10,16 +10,25 @@
 #define RC_BIT_THROTTLE             3
 
 
+#define SS_INPUT_REGISTER           PIND
+#define SS_DIRECTION_REGISTER       DDRD
+#define SS_OUTPUT_REGISTER          PORTD
 
-typedef struct 
+#define SS_BIT_SENSOR1              4
+#define SS_BIT_SENSOR2              5
+
+
+constexpr int rcFilterBufferSize = 6;
+
+typedef volatile struct 
 {
   bool signalOk;
   bool risingEdgeSeen;
   bool fallingEdgeSeen;
   uint32_t prevRisingTs;
-  uint32_t prevFallingTs;
   uint32_t cycleWidth;
-  uint32_t pulseWidth;
+  uint32_t pulseWidthArray[rcFilterBufferSize];
+  int bufIndex;
 } rcContext_t;
 
 typedef enum
@@ -30,7 +39,7 @@ typedef enum
   MOTOR_BRAKE
 } motorDrive_t;
 
-typedef struct
+typedef volatile struct
 {
   bool resetCycle;
 
@@ -53,6 +62,7 @@ typedef struct
 } motor_t;
 
 
+
 void rcContextInitialize(int ch);
 void rcContextInitialize(void);
 void motorInitialize();
@@ -63,61 +73,84 @@ void monitorRcReceiverStatus();
 void initializePwm();
 void getMotorPwmValuesISR(int idx, PwmDataForIsr_t *pwmData);
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted);
-void isrRcIncomingPulse(rcContext_t* c, int pin);
+void isrRcIncomingPulse(rcContext_t* c, int pin, const uint32_t ts);
 void isrDirectionSignalChange();
 void isrThrottleSignalChange();
-bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth);
+bool getData(uint32_t ch, uint32_t *pulseWidth);
 int16_t getSteeringDirection();
 int16_t getThrottlePosition();
-float calculateSteeringStrength(int16_t throttle);
 void speedControl();
-int16_t getBatteryLevel();
+int16_t getBatteryLevelInMilliVolts();
+int16_t getBatteryLevelInPercents();
 void setupRadioControlInput();
 void setupPwmTimer();
 void setupMotorOutputPins();
 
+void isrSpeedSensor0();
+void isrSpeedSensor1();
+uint32_t speedSensorRawValueGet(const int ch);
+uint32_t speedSensorRpmAbsGet(const int ch);
 
-PwmDataForIsr_t pwmDataForIsr[2] = {0};
-volatile rcContext_t rcContext[2];
+void speedAdjust(int16_t& outR, int16_t& outL);
+
+
+PwmDataForIsr_t pwmDataForIsr[2] = {};
+rcContext_t rcContext[2];
+volatile uint32_t speedSensorTicks[2];
+volatile uint32_t speedSensorEighthsOfRevolution[2];
+volatile uint32_t speedSensorSeqNo;   /*incremented each time the RPS values have been updated. Used for synchronizing the speedAdjust.*/
 motor_t motor[2];
 uint32_t pulseCounter[2] = {0};
 bool pwmEnable = false;
 
+volatile uint32_t sgTimerCntr = 0;
+volatile uint32_t pwmTimerCntr = 0;
 
-void DBGOUT_1_ON()
-{
-  constexpr uint8_t mask = 1 << 4;
-  PORTD |= mask;
-}
-void DBGOUT_1_OFF()
-{
-  constexpr uint8_t mask = ~(1 << 4);
-  PORTD &= mask;
-}
 
-void DBGOUT_2_ON()
+void sensorContextInitialize(void)
 {
-  constexpr uint8_t mask = 1 << 5;
-  PORTD |= mask;
-}
-void DBGOUT_2_OFF()
-{
-  constexpr uint8_t mask = ~(1 << 5);
-  PORTD &= mask;
+  speedSensorTicks[0] = 0;
+  speedSensorTicks[1] = 0;
+  speedSensorSeqNo = 0;
 }
 
 
+void setupSpeedSensor()
+{
+  sensorContextInitialize();
+
+  pinMode(SS_BIT_SENSOR1, INPUT_PULLUP);
+  pinMode(SS_BIT_SENSOR2, INPUT_PULLUP);
+
+  /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
+  attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR1), isrSpeedSensor0, CHANGE);
+  attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR2), isrSpeedSensor1, CHANGE);
+
+}
+
+void isrSpeedSensor0()
+{
+  speedSensorTicks[0]++;
+}
+
+void isrSpeedSensor1()
+{
+  speedSensorTicks[1]++;
+}
 
 void rcContextInitialize(int ch)
 {
-  rcContext_t* c = &(rcContext[ch]);
-  memset(c, 0, sizeof(rcContext_t));
+  if(ch < 2)
+  {
+    rcContext_t* c = &(rcContext[ch]);
+    memset((void*)c, 0, sizeof(rcContext_t));
+  }
 }
 
 void rcContextInitialize(void)
 {
   rcContextInitialize(0);
-  rcContextInitialize(0);
+  rcContextInitialize(1);
 }
 
 void motorInitialize()
@@ -153,7 +186,7 @@ void motorOutputUpdate()
     }
 
     int16_t pwmAbs = abs(mv);
-    uint16_t tw = map(pwmAbs, 0, 100, 100, 20);   /*30kHz ISR -> 1.5kHz at highest throttle, 300Hz at lowest*/
+    uint16_t tw = 100;//map(pwmAbs, 0, 100, 100, 40);   /*40kHz ISR -> 1000Hz at highest throttle, 400Hz at lowest*/
     uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
 
     switch(drv)
@@ -214,7 +247,19 @@ void motorValueSet(int idx, int16_t valueInPercent)
   if(idx < 2)
   {
     motor_t *m = &(motor[idx]);
-    m->value = valueInPercent; //map(valueInPercent, -100, 100, pwmRangeMin, pwmRangeMax);
+    constexpr int16_t posMax = 100;
+    constexpr int16_t negMax = -posMax;
+
+    if(valueInPercent > posMax)
+    {
+      valueInPercent = posMax;
+    }
+    else if(valueInPercent < negMax)
+    {
+      valueInPercent = negMax;
+    }
+
+    m->value = valueInPercent;
   }
 }
 
@@ -231,7 +276,6 @@ void motorEnable(int idx, bool enable)
 void monitorRcReceiverStatus()
 {
   static uint32_t prevTs = 0;
-  static uint32_t prevRcCounter = 0;
   uint32_t ts = millis();
   uint32_t age = ts-prevTs;
 
@@ -260,8 +304,8 @@ void monitorRcReceiverStatus()
 
 void initializePwm()
 {
-  memset(&(pwmDataForIsr[0]), 0, sizeof(PwmDataForIsr_t));
-  memset(&(pwmDataForIsr[1]), 0, sizeof(PwmDataForIsr_t));
+  memset((void*)&(pwmDataForIsr[0]), 0, sizeof(PwmDataForIsr_t));
+  memset((void*)&(pwmDataForIsr[1]), 0, sizeof(PwmDataForIsr_t));
 
   pwmDataForIsr[0].resetCycle = true;
   pwmDataForIsr[1].resetCycle = true;
@@ -275,11 +319,11 @@ void getMotorPwmValuesISR(int idx, PwmDataForIsr_t *pwmData)
   int activeIdx = m->activePwmDataForIsrIndex;
   PwmDataForIsr_t *activeData = &(m->pwmData[activeIdx]);
 
-  memcpy(pwmData, activeData, sizeof(PwmDataForIsr_t));
+  memcpy((void*)pwmData, (const void*)activeData, sizeof(PwmDataForIsr_t));
 }
 
-inline void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1) __attribute__((always_inline));
-void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1)
+inline void setMotorPinsISR(const int idx, volatile uint8_t &val0, volatile uint8_t &val1) __attribute__((always_inline));
+void setMotorPinsISR(const int idx, volatile uint8_t &val0, volatile uint8_t &val1)
 {
   //will fail if idx >= 2!
 
@@ -304,15 +348,11 @@ void setMotorPinsISR(int idx, uint8_t &val0, uint8_t &val1)
   }
 }
 
-uint32_t timerCntr=0;
-
 ISR(TIMER2_COMPA_vect)
 {
   int m;
 
-  DBGOUT_1_ON();
-
-  timerCntr++;
+  pwmTimerCntr++;
 
   for(m = 0; m < 2; m++)
   {
@@ -354,10 +394,32 @@ ISR(TIMER2_COMPA_vect)
       }      
     }
   }
-
-  DBGOUT_1_OFF();
-
 }
+
+
+ISR(TIMER1_COMPA_vect) 
+{
+  int ch;
+  volatile uint32_t ctr[2];
+  static uint32_t prevCtr[2] = {};
+
+  ctr[0] = speedSensorTicks[0];
+  ctr[1] = speedSensorTicks[1];
+
+  sgTimerCntr++;
+
+  for(ch = 0; ch < 2; ch++)
+  {
+    speedSensorEighthsOfRevolution[ch] = ctr[ch] - prevCtr[ch];
+  }
+
+  prevCtr[0] = ctr[0];
+  prevCtr[1] = ctr[1];
+  
+  /*inform speedAdjust (it must be updated at less than 125ms interval to be able to catch changes. Recommended 60ms or less.*/
+  speedSensorSeqNo++;
+}
+
 
 bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
 {
@@ -365,15 +427,15 @@ bool checkRange(uint32_t val, uint32_t minAccepted, uint32_t maxAccepted)
   {
     return true;
   }
+
   return false;
 }
 
 uint32_t rcCntr = 0;
 
 
-void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
+void isrRcIncomingPulse(const int ch, const uint8_t pinMask, const uint32_t ts)
 {
-  uint32_t ts = micros();
   bool rising = ((PIND & pinMask) == 0 ? false : true);
   rcContext_t* c = &(rcContext[ch]);
 
@@ -396,11 +458,11 @@ void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
     if(c->signalOk)
     {
       /*calculate pulse width*/
-      c->pulseWidth = ts - c->prevRisingTs;
+      c->pulseWidthArray[c->bufIndex] = ts - c->prevRisingTs;
+      c->bufIndex = (c->bufIndex < (rcFilterBufferSize-1) ? c->bufIndex + 1 : 0);
     }
 
     /*remember context information*/
-    c->prevFallingTs = ts;
     c->fallingEdgeSeen = true;
   }
 
@@ -418,32 +480,49 @@ void isrRcIncomingPulse(const int ch, const uint8_t pinMask)
 
 void isrDirectionSignalChange()
 {
+  const uint32_t ts = micros();
   constexpr uint8_t pinMask = 1 << RC_BIT_DIRECTION;
-  isrRcIncomingPulse(0, pinMask);
+  isrRcIncomingPulse(0, pinMask, ts);
 }
 
 void isrThrottleSignalChange()
 {
+  const uint32_t ts = micros();
   constexpr uint8_t pinMask = 1 << RC_BIT_THROTTLE;
-  isrRcIncomingPulse(1, pinMask);
+  isrRcIncomingPulse(1, pinMask, ts);
 }
 
-bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
+uint32_t getFilteredPulseWidth(rcContext_t *c)
+{
+  int i;
+  uint32_t sum = 0;
+
+  for(i = 0; i < rcFilterBufferSize; i++)
+  {
+    sum += c->pulseWidthArray[i];
+  }
+
+  return round((float)sum / rcFilterBufferSize);
+}
+
+bool getData(uint32_t ch, uint32_t *pulseWidth)
 {
   bool ret = false;
 
   if(ch < 2)
   {
     rcContext_t *c = &(rcContext[ch]);
+    uint32_t pwAvg;
+
+    pwAvg = getFilteredPulseWidth(c);
 
     if(c->signalOk
         && checkRange(c->cycleWidth, 15000, 18000)
-        && checkRange(c->pulseWidth, 0, c->cycleWidth)
+        && checkRange(pwAvg, 0, c->cycleWidth)
     )
     {
       /*TODO: the reading should be atomic*/
-      *pulseWidth = c->pulseWidth;
-      *cycleWidth = c->cycleWidth;
+      *pulseWidth = pwAvg;
       ret = true;
     }
   }
@@ -454,9 +533,9 @@ bool getData(uint32_t ch, uint32_t *pulseWidth, uint32_t *cycleWidth)
 int16_t getSteeringDirection()
 {
   int16_t steeringDirection = 0;
-  uint32_t pw, cw;
+  uint32_t pw;
 
-  if(getData(0, &pw, &cw))
+  if(getData(0, &pw))
   {
     int32_t dir = (int32_t)map(pw, 1110, 2064, -100, 100);
 
@@ -475,7 +554,7 @@ int16_t getThrottlePosition()
   int16_t throttlePosition = 0;
   uint32_t pw, cw;
 
-  if(getData(1, &pw, &cw))
+  if(getData(1, &pw))
   {
     //min:1136
     //max:2088
@@ -502,74 +581,176 @@ int16_t getThrottlePosition()
   return throttlePosition;
 }
 
-float calculateSteeringStrength(int16_t throttle)
-{
-  float pct;
-
-  pct = (5.0 / (abs(throttle) / 10.0));
-
-  return pct;
-}
-
-
-
 void speedControl()
 {
-  bool ret = false;
+  volatile uint32_t seqNo = speedSensorSeqNo;
+  static uint32_t prevSeqNo = 0;
 
-DBGOUT_2_ON();
-
-  int16_t throttleInPercent = getThrottlePosition();
-  int16_t directionInPercent = getSteeringDirection();
-
-  int16_t outL = 0;
-  int16_t outR = 0;
-
-  if(throttleInPercent != 0)
+  /*check if 125ms timer tick has passed*/
+  if(seqNo != prevSeqNo)
   {
-    int16_t primaryMotor = throttleInPercent;
-
-    /*calculate value for the "another" motor*/
-
-    int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
-
-    if(directionInPercent < 0)
-    {
-      /*steering left*/
-      outL = secondaryMotor;
-      outR = primaryMotor;
-    }
-    else
-    {
-      /*steering right*/
-      outL = primaryMotor;
-      outR = secondaryMotor;
-    }
-  }
+    int16_t throttleInPercent = getThrottlePosition();
+    int16_t directionInPercent = getSteeringDirection();
+    int16_t outL = 0;
+    int16_t outR = 0;
 
 
-  motorValueSet(0, outR);
-  motorValueSet(1, outL);
-
-  motorOutputUpdate();
-
-#if 1
-  Serial.print(directionInPercent);
-  Serial.print(",");
-  Serial.print(throttleInPercent);
-  Serial.print(",");
-  Serial.print(outL);
-  Serial.print(",");
-  Serial.print(outR);
-  Serial.println(",-100,100");
-
+#if 0
+    Serial.print(throttleInPercent);
+    Serial.print(",");
+    Serial.print(directionInPercent);
+    Serial.println(",0,100");
 #endif
 
-DBGOUT_2_OFF();  
+
+#if 0
+    throttleInPercent /= 5;
+#endif
+
+
+#if 0
+    /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
+    /*ZAIM*/directionInPercent = 0;
+#endif
+
+    if(throttleInPercent != 0)
+    {
+      int16_t primaryMotor = throttleInPercent;
+
+      /*calculate value for the "another" motor*/
+
+      int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
+
+      if(directionInPercent < 0)
+      {
+        /*steering left*/
+        outL = secondaryMotor;
+        outR = primaryMotor;
+      }
+      else
+      {
+        /*steering right*/
+        outL = primaryMotor;
+        outR = secondaryMotor;
+      }
+    }
+
+    speedAdjust(outR, outL);
+
+    motorValueSet(0, 0);  //ZAIM outR);
+    motorValueSet(1, outL);
+
+    motorOutputUpdate();
+
+    prevSeqNo = seqNo;
+  }
+
   return;
 }
 
-int16_t getBatteryLevel()
+
+constexpr int motorMaxRps = 250;
+constexpr float motorPctToRpsFactor = (float)motorMaxRps / 100.0;
+
+void speedAdjust(int16_t& outR, int16_t& outL)
+{
+  static float adjFactor[2] = {1.0, 1.0};
+  static int16_t prevReqInAbs[2] = {};
+  int ch;
+  const int16_t newReqInAbs[2] = {abs(outR), abs(outL)};
+    
+  /*
+  ch: 0 = R
+      1 = L
+  */
+
+  for(ch = 0; ch < 2; ch++)
+  {
+    /*note: this part will be triggered by 125ms (one eighth of a second). When the encoder reports one tick, it corresponds to one Revolution Per Second (RPS). Similarly, 100 ticks -> 100RPS = 6000RPM.*/
+    uint32_t eights = speedSensorEighthsOfRevolution[ch];
+    int16_t reqInAbs = prevReqInAbs[ch];
+    float measuredRPS = (float)eights;
+    float requestedRPS = (float)reqInAbs * motorPctToRpsFactor;   /*reqInAbs is in percents: 1...100. The motor max is more than 250RPS with no load but we want to keep some reserve for water resistance.*/
+    float adj = 1.0;
+    float newReq = (float)newReqInAbs[ch] * motorPctToRpsFactor;
+    float reqFlt = (requestedRPS + newReq) / 2.0;   /*average prev and new to react smoother*/
+
+    float refUsedInCalculations = reqFlt;//requestedRPS;
+
+    if(eights != 0)
+    {
+      adj = refUsedInCalculations / measuredRPS;
+    }
+    else
+    {
+      /*no movement detected, check if movement was requested*/
+      if(refUsedInCalculations > 0)
+      {
+        /*req>0 and eighths==0 -> stalled. Give the motor a push to get it rotating.*/
+        adj = 2.0;  //((float)map(reqFlt, 0, 100, 40, 10)) / 10.0;
+      }
+    }
+
+    /*limit*/
+    if(adj > 3.0)
+      adj = 3.0;
+    else if(adj < 0.5)
+      adj = 0.5;
+
+    adjFactor[ch] = adj;
+
+#if 0
+    if(ch==1)
+    {
+      Serial.print(outL);
+      Serial.print(",");
+      Serial.print(requestedRPS);
+      Serial.print(",");
+      Serial.print(measuredRPS);
+      Serial.print(",");
+      Serial.print(adjFactor[1]);
+      Serial.print(",");
+      Serial.print(round(((float)outL) * adjFactor[1]));
+      Serial.println(",0,10");
+    }
+  #endif
+#if 1
+    if(ch==1)
+    {
+      Serial.print(getBatteryLevelInPercents());
+      Serial.print(",");
+      Serial.print(requestedRPS);
+      Serial.print(",");
+      Serial.print(measuredRPS);
+      Serial.print(",");
+      Serial.print(adjFactor[1]*100.0);
+    }
+  #endif
+  }
+
+
+
+
+#if 0 ///////////ZAIM
+  outR = (int16_t)round(((float)outR) * adjFactor[0]);
+  outL = (int16_t)round(((float)outL) * adjFactor[1]);
+#endif ///////////ZAIM
+
+  Serial.print(",");
+  Serial.print(outL);
+  Serial.println(",0,400");
+
+
+
+
+  prevReqInAbs[0] = abs(outR);
+  prevReqInAbs[1] = abs(outL);
+
+}
+
+
+
+int16_t getBatteryLevelInMilliVolts()
 {
   int32_t bvRaw = analogRead(A4);
   constexpr int32_t factorToMicroVolts = 1074 * (8500 / 1060);
@@ -578,13 +759,24 @@ int16_t getBatteryLevel()
   return bvMilliVolts;
 }
 
+int16_t getBatteryLevelInPercents()
+{
+  return (getBatteryLevelInMilliVolts() * 100) / 8000;
+}
+
+
 void setupRadioControlInput()
 {
   rcContextInitialize();
 
+#if 0
   constexpr uint8_t mask = (1 << RC_BIT_DIRECTION) | (1 << RC_BIT_THROTTLE);
 
   RC_DIRECTION_REGISTER = RC_DIRECTION_REGISTER & (~mask);  //force chosen bits to zero = input
+#endif
+
+  pinMode(RC_BIT_DIRECTION, INPUT);
+  pinMode(RC_BIT_THROTTLE, INPUT);
 
   /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
   attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
@@ -592,8 +784,33 @@ void setupRadioControlInput()
 }
 
 
+
+
+void setupspeedAdjustTimer() 
+{
+  // Clear registers
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+
+  // 8 Hz (16000000/((31249+1)*64))
+  OCR1A = 31249;
+  // CTC
+  TCCR1B |= (1 << WGM12);
+  // Prescaler 64
+  TCCR1B |= (1 << CS11) | (1 << CS10);
+  // Output Compare Match A Interrupt Enable
+  TIMSK1 |= (1 << OCIE1A);
+}
+
+
 void setupPwmTimer(uint32_t hz)
 {
+  uint32_t prescalers[] = {1, 8, 32};
+  uint32_t chosenPrescaler = 0;
+  uint32_t val = 0;
+  int i;
+
   TCCR2A = 0;
   TCCR2B = 0;
 
@@ -617,11 +834,7 @@ void setupPwmTimer(uint32_t hz)
     (16M/hz) / prescaler = val+1
   */
 
-  uint32_t prescalers[] = {1, 8, 32};
-  uint32_t chosenPrescaler = 0;
-  uint32_t val = 0;
-
-  for(int i = 0; i<3; i++)
+  for(i = 0; i<3; i++)
   {
     val =  ((16000000 / hz) / prescalers[i]) -1;
 
@@ -651,15 +864,7 @@ void setupPwmTimer(uint32_t hz)
 
   OCR2A = val;
 
-#if 0
-  Serial.print("Prescaler=");
-  Serial.print(chosenPrescaler);
-  Serial.print(", OCR2A=");
-  Serial.print(OCR2A);
-  Serial.println(".");
-#endif
   // enable timer compare interrupt
-  ////////////////////////////////    ZAIM    ///////////////////////
   TIMSK2 |= (1 << OCIE2A);
 }
 
@@ -682,10 +887,7 @@ void setup()
 
   analogReference(INTERNAL);
 
-  pinMode(13, OUTPUT);
-
-  pinMode(4, OUTPUT);
-  pinMode(5, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
 
   setupMotorOutputPins();
 
@@ -693,21 +895,21 @@ void setup()
 
   initializePwm();
 
+
   cli();  /*disable*/
+  setupSpeedSensor();
+  setupspeedAdjustTimer();
+  setupPwmTimer(40000);
   setupRadioControlInput();
-  setupPwmTimer(30000);
   sei();  /*enable*/
 }
-
-
 
 void loop()
 {
   speedControl();
-
   monitorRcReceiverStatus();
 
-  delay(20);
+  delay(10);
 }
 
 
