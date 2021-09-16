@@ -1,12 +1,9 @@
 #include "Common.hpp"
-
-#include "Common.hpp"
 #include "RcReceiver.hpp"
 #include "Controller.hpp"
 #include "MotorDriver.hpp"
 #include "SpeedEncoder.hpp"
 #include "BatteryMonitor.hpp"
-
 
 /*
 btm   BatteryMonitor
