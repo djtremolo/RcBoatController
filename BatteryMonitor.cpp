@@ -19,6 +19,9 @@ int16_t btm_getBatteryLevelInPercent()
 
 void btm_initialize()
 {
+  /*set to internal 1.1V reference*/
+  analogReference(INTERNAL);
+  
   /*read value couple of times to allow adc to settle*/
   for(int i=0; i<10; i++)
   {
