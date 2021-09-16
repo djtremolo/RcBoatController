@@ -3,8 +3,9 @@
 #include "Common.hpp"
 
 
+void rcr_initialize(void);
 
-int16_t getSteeringDirection();
-int16_t getThrottlePosition();
+void rcr_getData(int16_t &throttlePct, int16_t &directionPct);
+bool rcr_checkRadioStatus();
 
 #endif

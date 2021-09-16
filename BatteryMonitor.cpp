@@ -1,13 +1,9 @@
 #include "BatteryMonitor.hpp"
 
 
-int16_t getBatteryLevelInMilliVolts();
-int16_t getBatteryLevelInPercents();
+static int16_t getBatteryLevelInMilliVolts();
 
-
-
-
-int16_t getBatteryLevelInMilliVolts()
+static int16_t getBatteryLevelInMilliVolts()
 {
   int32_t bvRaw = analogRead(A4);
   constexpr int32_t factorToMicroVolts = 1074 * (8500 / 1060);
@@ -16,8 +12,18 @@ int16_t getBatteryLevelInMilliVolts()
   return bvMilliVolts;
 }
 
-int16_t getBatteryLevelInPercents()
+int16_t btm_getBatteryLevelInPercent()
 {
   return (getBatteryLevelInMilliVolts() * 100) / 8000;
+}
+
+void btm_initialize()
+{
+  /*read value couple of times to allow adc to settle*/
+  for(int i=0; i<10; i++)
+  {
+    (void)analogRead(A4);
+    delay(1);
+  }
 }
 

@@ -2,6 +2,15 @@
 
 
 
+
+
+#define RC_INPUT_REGISTER           PIND
+#define RC_DIRECTION_REGISTER       DDRD
+#define RC_OUTPUT_REGISTER          PORTD
+
+#define RC_BIT_DIRECTION            2
+#define RC_BIT_THROTTLE             3
+
 constexpr int rcFilterBufferSize = 6;
 
 
@@ -22,70 +31,27 @@ uint32_t rcCntr = 0;
 uint32_t pulseCounter[2] = {0};
 
 
-void rcContextInitialize(int ch);
-void rcContextInitialize(void);
+void contextInitialize(void);
 
 void setupRadioControlInput();
 
 void isrRcIncomingPulse(radioControlContext_t* c, int pin, const uint32_t ts);
 void isrDirectionSignalChange();
 void isrThrottleSignalChange();
-bool getData(uint32_t ch, uint32_t *pulseWidth);
+bool getRawData(uint32_t ch, uint32_t *pulseWidth);
 
-void monitorRcReceiverStatus();
-
-
-
+int16_t getSteeringDirection();
+int16_t getThrottlePosition();
 
 
-
-
-
-
-void rcContextInitialize(int ch)
+void contextInitialize()
 {
-  if(ch < 2)
+  for(int ch=0; ch<2; ch++)
   {
     radioControlContext_t* c = &(rcContext[ch]);
     memset((void*)c, 0, sizeof(radioControlContext_t));
   }
 }
-
-void rcContextInitialize(void)
-{
-  rcContextInitialize(0);
-  rcContextInitialize(1);
-}
-
-
-
-
-
-void setupRadioControlInput()
-{
-  rcContextInitialize();
-
-#if 0
-  constexpr uint8_t mask = (1 << RC_BIT_DIRECTION) | (1 << RC_BIT_THROTTLE);
-
-  RC_DIRECTION_REGISTER = RC_DIRECTION_REGISTER & (~mask);  //force chosen bits to zero = input
-#endif
-
-  pinMode(RC_BIT_DIRECTION, INPUT);
-  pinMode(RC_BIT_THROTTLE, INPUT);
-
-  /*Assign interrupt service routines to both ports. TODO: change to non-arduino later, as the isr uses raw IO*/
-  attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(RC_BIT_THROTTLE), isrThrottleSignalChange, CHANGE);
-}
-
-
-
-
-
-
-
-
 
 void isrRcIncomingPulse(const int ch, const uint8_t pinMask, const uint32_t ts)
 {
@@ -129,8 +95,6 @@ void isrRcIncomingPulse(const int ch, const uint8_t pinMask, const uint32_t ts)
   }
 }
 
-
-
 void isrDirectionSignalChange()
 {
   const uint32_t ts = micros();
@@ -158,7 +122,7 @@ uint32_t getFilteredPulseWidth(radioControlContext_t *c)
   return round((float)sum / rcFilterBufferSize);
 }
 
-bool getData(uint32_t ch, uint32_t *pulseWidth)
+bool getRawData(uint32_t ch, uint32_t *pulseWidth)
 {
   bool ret = false;
 
@@ -170,8 +134,8 @@ bool getData(uint32_t ch, uint32_t *pulseWidth)
     pwAvg = getFilteredPulseWidth(c);
 
     if(c->signalOk
-        && checkRange(c->cycleWidth, 15000, 18000)
-        && checkRange(pwAvg, 0, c->cycleWidth)
+        && com_checkRange(c->cycleWidth, 15000, 18000)
+        && com_checkRange(pwAvg, 0, c->cycleWidth)
     )
     {
       /*TODO: the reading should be atomic*/
@@ -188,7 +152,7 @@ int16_t getSteeringDirection()
   int16_t steeringDirection = 0;
   uint32_t pw;
 
-  if(getData(0, &pw))
+  if(getRawData(0, &pw))
   {
     int32_t dir = (int32_t)map(pw, 1110, 2064, -100, 100);
 
@@ -207,7 +171,7 @@ int16_t getThrottlePosition()
   int16_t throttlePosition = 0;
   uint32_t pw, cw;
 
-  if(getData(1, &pw))
+  if(getRawData(1, &pw))
   {
     //min:1136
     //max:2088
@@ -235,10 +199,28 @@ int16_t getThrottlePosition()
 }
 
 
-
-
-void monitorRcReceiverStatus()
+void rcr_getData(int16_t &throttlePct, int16_t &directionPct)
 {
+  throttlePct = getThrottlePosition();
+  directionPct = getSteeringDirection();
+}
+
+void rcr_initialize(void)
+{
+  contextInitialize();
+
+  pinMode(RC_BIT_DIRECTION, INPUT);
+  pinMode(RC_BIT_THROTTLE, INPUT);
+
+  cli();  /*disable*/
+  attachInterrupt(digitalPinToInterrupt(RC_BIT_DIRECTION), isrDirectionSignalChange, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RC_BIT_THROTTLE), isrThrottleSignalChange, CHANGE);
+  sei();  /*enable*/
+}
+
+bool rcr_checkRadioStatus()
+{
+  static bool ret = false;
   static uint32_t prevTs = 0;
   uint32_t ts = millis();
   uint32_t age = ts-prevTs;
@@ -247,16 +229,15 @@ void monitorRcReceiverStatus()
   {
     static uint32_t prevCounters[2] = {0};
 
-    if((pulseCounter[0] == prevCounters[0]))
+    if((pulseCounter[0] == prevCounters[0])
+      || (pulseCounter[1] == prevCounters[1]))
     {
-      Serial.println("ERROR: Direction pulse not detected");
-      rcContextInitialize(0);
+      contextInitialize();
+      ret = false;
     }
-
-    if((pulseCounter[1] == prevCounters[1]))
+    else
     {
-      Serial.println("ERROR: Throttle pulse not detected");
-      rcContextInitialize(1);
+      ret = true;
     }
 
     prevCounters[0] = pulseCounter[0];
@@ -264,5 +245,7 @@ void monitorRcReceiverStatus()
 
     prevTs = ts;
   }
+
+  return ret;
 }
 

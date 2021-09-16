@@ -1,17 +1,45 @@
 #include "MotorDriver.hpp"
 
 
+typedef enum
+{
+  MOTOR_COAST,
+  MOTOR_FORWARD,
+  MOTOR_REVERSE,
+  MOTOR_BRAKE
+} motorDrive_t;
+
+typedef volatile struct
+{
+  bool resetCycle;
+
+  uint8_t activeDutyValue[2];   
+  uint8_t passiveDutyValue[2];
+
+  uint16_t activeWidth; /*pre-calculated for ISR: ticks to stay active*/
+  uint16_t totalWidth;  /*pre-calculated for ISR: ticks to rest*/
+} pwmDataForIsr_t;
+
+typedef struct
+{
+  bool enable;
+  int16_t value;    /*free to be written at any time*/
+
+  /*two pwm data sets. The non-active one is used for preparing for next PWM cycle. 
+  After the data is prepared, the activeIndex is changed to point to new values.*/
+  int activePwmDataForIsrIndex;
+  pwmDataForIsr_t pwmData[2];
+} motorContext_t;
+
+
+
 pwmDataForIsr_t pwmDataForIsr[2] = {};
-motorContext_t motor[2];
+motorContext_t motorContext[2];
 volatile uint32_t pwmTimerCntr = 0;
 
-void motorInitialize();
-void motorOutputUpdate();
-void motorValueSet(int idx, int16_t valueInPercent);
-void motorEnable(int idx, bool enable);
 void getMotorPwmValuesISR(int idx, pwmDataForIsr_t *pwmData);
-void setupPwmTimer();
-void initializePwm();
+void pwmTimerSetup();
+void pwmInitialize();
 void setupMotorOutputPins();
 
 
@@ -32,7 +60,7 @@ void setupMotorOutputPins()
 }
 
 
-void setupPwmTimer(uint32_t hz)
+void pwmTimerSetup(uint32_t hz)
 {
   uint32_t prescalers[] = {1, 8, 32};
   uint32_t chosenPrescaler = 0;
@@ -97,11 +125,37 @@ void setupPwmTimer(uint32_t hz)
 }
 
 
+inline void mot_setPwmPins(const int idx, volatile uint8_t &val0, volatile uint8_t &val1) __attribute__((always_inline));
+void mot_setPwmPins(const int idx, volatile uint8_t &val0, volatile uint8_t &val1)
+{
+  //will fail if idx >= 2!
+
+  int pinIdx = idx*2;
+
+  if(val0 == HIGH) 
+  {
+    PORTC |= 0x01 << pinIdx;
+  }
+  else
+  {
+    PORTC &= ~(0x01 << pinIdx);
+  }
+
+  if(val1 == HIGH) 
+  {
+    PORTC |= 0x02 << pinIdx;
+  }
+  else
+  {
+    PORTC &= ~(0x02 << pinIdx);
+  }
+}
+
 
 void getMotorPwmValuesISR(int idx, pwmDataForIsr_t *pwmData)
 {
   /*Will fail if idx > 1*/
-  motorContext_t *m = &(motor[idx]);
+  motorContext_t *m = &(motorContext[idx]);
   int activeIdx = m->activePwmDataForIsrIndex;
   pwmDataForIsr_t *activeData = &(m->pwmData[activeIdx]);
 
@@ -124,7 +178,7 @@ ISR(TIMER2_COMPA_vect)
       /*capture new values*/
       getMotorPwmValuesISR(m, pd);
 
-      setMotorPinsISR(m, pd->activeDutyValue[0], pd->activeDutyValue[1]);
+      mot_setPwmPins(m, pd->activeDutyValue[0], pd->activeDutyValue[1]);
     }
     else
     {
@@ -145,7 +199,7 @@ ISR(TIMER2_COMPA_vect)
           if(pd->activeWidth == 0)
           {
             /*clear output*/
-            setMotorPinsISR(m, pd->passiveDutyValue[0], pd->passiveDutyValue[1]);
+            mot_setPwmPins(m, pd->passiveDutyValue[0], pd->passiveDutyValue[1]);
           }
         }
       }
@@ -160,26 +214,14 @@ ISR(TIMER2_COMPA_vect)
 
 
 
-void motorInitialize()
-{
-  int i;
-  for(i=0; i<2; i++)
-  {
-    motorContext_t* m = &(motor[i]);
 
-    memset(m, 0, sizeof(motorContext_t));
-    motorValueSet(i, 0);
-    motorEnable(i, true);
-  }
-}
-
-void motorOutputUpdate()
+void mot_outputUpdate()
 {
   int idx;
 
   for(idx = 0; idx < 2; idx++)
   {
-    motorContext_t *m = &(motor[idx]);
+    motorContext_t *m = &(motorContext[idx]);
 
     int16_t mv = m->enable ? m->value : 0;
     motorDrive_t drv = MOTOR_COAST;
@@ -249,11 +291,11 @@ void motorOutputUpdate()
 }
 
 
-void motorValueSet(int idx, int16_t valueInPercent)
+void mot_valueSet(int idx, int16_t valueInPercent)
 {
   if(idx < 2)
   {
-    motorContext_t *m = &(motor[idx]);
+    motorContext_t *m = &(motorContext[idx]);
     constexpr int16_t posMax = 100;
     constexpr int16_t negMax = -posMax;
 
@@ -270,22 +312,45 @@ void motorValueSet(int idx, int16_t valueInPercent)
   }
 }
 
-void motorEnable(int idx, bool enable)
+void mot_outputEnable(int idx, bool enable)
 {
   if(idx < 2)
   {
-    motorContext_t *m = &(motor[idx]);
+    motorContext_t *m = &(motorContext[idx]);
     m->enable = enable;
   }
 }
 
 
-void initializePwm()
+void pwmInitialize()
 {
   memset((void*)&(pwmDataForIsr[0]), 0, sizeof(pwmDataForIsr_t));
   memset((void*)&(pwmDataForIsr[1]), 0, sizeof(pwmDataForIsr_t));
 
   pwmDataForIsr[0].resetCycle = true;
   pwmDataForIsr[1].resetCycle = true;
+}
+
+
+void mot_initialize()
+{
+  int i;
+
+  setupMotorOutputPins();
+
+  pwmInitialize();
+
+  for(i=0; i<2; i++)
+  {
+    motorContext_t* m = &(motorContext[i]);
+
+    memset(m, 0, sizeof(motorContext_t));
+    mot_valueSet(i, 0);
+    mot_outputEnable(i, true);
+  }
+
+  cli();  /*disable*/
+  pwmTimerSetup(40000);
+  sei();  /*enable*/
 }
 
