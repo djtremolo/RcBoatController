@@ -23,7 +23,7 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
 
 
-  Serial.println("cumulativeDiff,batPct,encR,encL,outRAfter,outLAfter");
+  Serial.println("cumulativeDiff,encR,encL,outRAfter,outLAfter");
 
 
   rcr_initialize();
@@ -59,8 +59,8 @@ bool timeForNewControlCycle()
 
 void loop()
 {
-  int16_t outR;
-  int16_t outL;
+  float outR;
+  float outL;
   int16_t throttleInPercent;
   int16_t directionInPercent;
   uint32_t encR;
@@ -68,7 +68,7 @@ void loop()
 
   static uint32_t cumulativeEncR = 0;
   static uint32_t cumulativeEncL = 0;
-  int32_t cumulativeDiff;
+  static int32_t cumulativeDiff = 0;
 
   /*only run at 125ms interval*/
   if(timeForNewControlCycle())
@@ -106,15 +106,17 @@ void loop()
 
     /*activate new motor output values for PWM generation (generation handled by motor controller module) */
     mot_outputUpdate();
+
+
+    cumulativeDiff = cumulativeEncR - cumulativeEncL;
+
   }
 
-
-  cumulativeDiff = cumulativeEncR - cumulativeEncL;
-
 #if 1
+if(throttleInPercent)
+{
+
   Serial.print(cumulativeDiff);
-  Serial.print(",");
-  Serial.print(btm_getBatteryLevelInPercent());
   Serial.print(",");
   Serial.print((float)encR / 2.5);
   Serial.print(",");
@@ -123,7 +125,9 @@ void loop()
   Serial.print(outR);
   Serial.print(",");
   Serial.println(outL);
+}
 #endif
+
 
 
   statusMonitor();

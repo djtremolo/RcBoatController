@@ -291,24 +291,25 @@ void mot_outputUpdate()
 }
 
 
-void mot_valueSet(int idx, int16_t valueInPercent)
+void mot_valueSet(int idx, float valueInPercent)
 {
   if(idx < 2)
   {
     motorContext_t *m = &(motorContext[idx]);
     constexpr int16_t posMax = 100;
     constexpr int16_t negMax = -posMax;
+    int16_t iVal = (int16_t)round(valueInPercent);
 
-    if(valueInPercent > posMax)
+    if(iVal > posMax)
     {
-      valueInPercent = posMax;
+      iVal = posMax;
     }
-    else if(valueInPercent < negMax)
+    else if(iVal < negMax)
     {
-      valueInPercent = negMax;
+      iVal = negMax;
     }
 
-    m->value = valueInPercent;
+    m->value = iVal;
   }
 }
 

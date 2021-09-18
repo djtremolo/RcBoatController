@@ -1,5 +1,7 @@
 #include "Controller.hpp"
 
+static float fMap(float x, float in_min, float in_max, float out_min, float out_max);
+
 void controlCycleTimerSetup();
 
 void controlCycleTimerSetup()
@@ -29,35 +31,38 @@ void ctr_initialize()
 }
 
 
-
+static float fMap(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 /*note: this function should be called only at 125ms timer cycle*/
-void ctr_speedControl(int16_t& outR, int16_t& outL, const int16_t throttleInPercent, const int16_t directionInPercent)
+void ctr_speedControl(float& fOutR, float& fOutL, const int16_t throttleInPercent, const int16_t directionInPercent)
 {
   if(throttleInPercent != 0)
   {
-    int16_t primaryMotor = throttleInPercent;
+    float primaryMotor = (float)throttleInPercent;
 
     /*calculate value for the "another" motor*/
 
-    int16_t secondaryMotor = map(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
+    float secondaryMotor = fMap(abs(directionInPercent), 0, 100, primaryMotor, -primaryMotor);
 
     if(directionInPercent < 0)
     {
       /*steering left*/
-      outL = secondaryMotor;
-      outR = primaryMotor;
+      fOutL = secondaryMotor;
+      fOutR = primaryMotor;
     }
     else
     {
       /*steering right*/
-      outL = primaryMotor;
-      outR = secondaryMotor;
+      fOutL = primaryMotor;
+      fOutR = secondaryMotor;
     }
   }
   else
   {
-    outL = outR = 0;
+    fOutL = fOutR = 0.0;
   }
 
   return;
@@ -66,12 +71,12 @@ void ctr_speedControl(int16_t& outR, int16_t& outL, const int16_t throttleInPerc
 
 
 /*note: this function should be called only at 125ms timer cycle*/
-void ctr_speedAdjust(int16_t& outR, int16_t& outL, const uint32_t encTicksR, const uint32_t encTicksL)
+void ctr_speedAdjust(float& fOutR, float& fOutL, const uint32_t encTicksR, const uint32_t encTicksL)
 {
   static float adjFactor[2] = {1.0, 1.0};
   static int16_t prevReqInAbs[2] = {};
 
-  const int16_t newReqInAbs[2] = {abs(outR), abs(outL)};
+  const float newReqInAbs[2] = {abs(fOutR), abs(fOutL)};
   const uint32_t encTicks[2] = {encTicksR, encTicksL};
 
   constexpr int motorMaxRps = 250;    /*roughly measured in free spin with fresh batteries, lowered with certain margin to be close enough*/
@@ -90,7 +95,7 @@ void ctr_speedAdjust(int16_t& outR, int16_t& outL, const uint32_t encTicksR, con
     float measuredRPS = (float)eights;
     float requestedRPS = (float)reqInAbs * motorPctToRpsFactor;   /*reqInAbs is in percents: 1...100. The motor max is more than 250RPS with no load but we want to keep some reserve for water resistance.*/
     float adj = 1.0;
-    float newReq = (float)newReqInAbs[ch] * motorPctToRpsFactor;
+    float newReq = newReqInAbs[ch] * motorPctToRpsFactor;
     float reqFlt = (requestedRPS + newReq) / 2.0;   /*average prev and new to react smoother*/
 
     float refUsedInCalculations = (1?requestedRPS:reqFlt);    /*0-> filtered input, 1->direct input*/
@@ -118,13 +123,10 @@ void ctr_speedAdjust(int16_t& outR, int16_t& outL, const uint32_t encTicksR, con
     adjFactor[ch] = adj;
   }
 
+  fOutR *= adjFactor[0];
+  fOutL *= adjFactor[1];
 
-
-
-  outR = (int16_t)round(((float)outR) * adjFactor[0]);
-  outL = (int16_t)round(((float)outL) * adjFactor[1]);
-
-  prevReqInAbs[0] = abs(outR);
-  prevReqInAbs[1] = abs(outL);
+  prevReqInAbs[0] = abs(fOutR);
+  prevReqInAbs[1] = abs(fOutL);
 }
 

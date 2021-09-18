@@ -7,7 +7,7 @@
 
 void mot_initialize();
 void mot_outputUpdate();
-void mot_valueSet(int idx, int16_t valueInPercent);
+void mot_valueSet(int idx, float valueInPercent);
 void mot_outputEnable(int idx, bool enable);
 
 
