@@ -34,25 +34,6 @@ void ctr_initialize()
 /*note: this function should be called only at 125ms timer cycle*/
 void ctr_speedControl(int16_t& outR, int16_t& outL, const int16_t throttleInPercent, const int16_t directionInPercent)
 {
-
-#if 0
-  Serial.print(throttleInPercent);
-  Serial.print(",");
-  Serial.print(directionInPercent);
-  Serial.println(",0,100");
-#endif
-
-
-#if 0
-  throttleInPercent /= 5;
-#endif
-
-
-#if 0
-  /*ZAIM*/if(throttleInPercent>5) throttleInPercent = 5; else throttleInPercent = 0;
-  /*ZAIM*/directionInPercent = 0;
-#endif
-
   if(throttleInPercent != 0)
   {
     int16_t primaryMotor = throttleInPercent;
@@ -73,6 +54,10 @@ void ctr_speedControl(int16_t& outR, int16_t& outL, const int16_t throttleInPerc
       outL = primaryMotor;
       outR = secondaryMotor;
     }
+  }
+  else
+  {
+    outL = outR = 0;
   }
 
   return;
@@ -108,7 +93,7 @@ void ctr_speedAdjust(int16_t& outR, int16_t& outL, const uint32_t encTicksR, con
     float newReq = (float)newReqInAbs[ch] * motorPctToRpsFactor;
     float reqFlt = (requestedRPS + newReq) / 2.0;   /*average prev and new to react smoother*/
 
-    float refUsedInCalculations = reqFlt;//requestedRPS;
+    float refUsedInCalculations = (1?requestedRPS:reqFlt);    /*0-> filtered input, 1->direct input*/
 
     if(eights != 0)
     {
@@ -120,56 +105,24 @@ void ctr_speedAdjust(int16_t& outR, int16_t& outL, const uint32_t encTicksR, con
       if(refUsedInCalculations > 0)
       {
         /*req>0 and eighths==0 -> stalled. Give the motor a push to get it rotating.*/
-        adj = 2.0;  //((float)map(reqFlt, 0, 100, 40, 10)) / 10.0;
+        adj = 2.0;
       }
     }
 
     /*limit*/
-    if(adj > 3.0)
-      adj = 3.0;
+    if(adj > 5.0)
+      adj = 5.0;
     else if(adj < 0.5)
       adj = 0.5;
 
     adjFactor[ch] = adj;
-
-#if 0
-    if(ch==1)
-    {
-      Serial.print(outL);
-      Serial.print(",");
-      Serial.print(requestedRPS);
-      Serial.print(",");
-      Serial.print(measuredRPS);
-      Serial.print(",");
-      Serial.print(adjFactor[1]);
-      Serial.print(",");
-      Serial.print(round(((float)outL) * adjFactor[1]));
-      Serial.println(",0,10");
-    }
-  #endif
-#if 1
-    if(ch==1)
-    {
-      Serial.print(requestedRPS);
-      Serial.print(",");
-      Serial.print(measuredRPS);
-      Serial.print(",");
-      Serial.print(adjFactor[1]*100.0);
-    }
-  #endif
   }
 
 
 
 
-#if 1 ///////////ZAIM
   outR = (int16_t)round(((float)outR) * adjFactor[0]);
   outL = (int16_t)round(((float)outL) * adjFactor[1]);
-#endif ///////////ZAIM
-
-  Serial.print(",");
-  Serial.print(outL);
-  Serial.println(",0,400");
 
   prevReqInAbs[0] = abs(outR);
   prevReqInAbs[1] = abs(outL);

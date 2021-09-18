@@ -11,7 +11,7 @@
 #define RC_BIT_DIRECTION            2
 #define RC_BIT_THROTTLE             3
 
-constexpr int rcFilterBufferSize = 6;
+constexpr int rcFilterBufferSize = 7;
 
 
 typedef volatile struct 
@@ -113,13 +113,23 @@ uint32_t getFilteredPulseWidth(radioControlContext_t *c)
 {
   int i;
   uint32_t sum = 0;
+  uint32_t pwMax = 0;
+  uint32_t pwMin = UINT32_MAX;
 
   for(i = 0; i < rcFilterBufferSize; i++)
   {
-    sum += c->pulseWidthArray[i];
+    uint32_t newPw = c->pulseWidthArray[i];
+    sum += newPw;
+    if(newPw > pwMax) pwMax = newPw;
+    if(newPw < pwMin) pwMin = newPw;
   }
 
-  return round((float)sum / rcFilterBufferSize);
+  /*remove biggest and smallest*/
+  sum -= pwMax;
+  sum -= pwMin;
+
+  /*calculate avg for N-2*/
+  return round((float)sum / (rcFilterBufferSize-2));
 }
 
 bool getRawData(uint32_t ch, uint32_t *pulseWidth)

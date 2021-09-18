@@ -57,6 +57,7 @@ bool enc_125msElapsed()
     prevSeqNo = seqNo;
     ret = true;
   }
+  return ret;
 }
 
 

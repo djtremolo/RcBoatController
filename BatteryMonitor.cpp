@@ -14,7 +14,7 @@ static int16_t getBatteryLevelInMilliVolts()
 
 int16_t btm_getBatteryLevelInPercent()
 {
-  return (getBatteryLevelInMilliVolts() * 100) / 8000;
+  return (getBatteryLevelInMilliVolts() * 100) / 8200;
 }
 
 void btm_initialize()

@@ -23,6 +23,9 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
 
 
+  Serial.println("cumulativeDiff,batPct,encR,encL,outRAfter,outLAfter");
+
+
   rcr_initialize();
   mot_initialize();
   enc_initialize();
@@ -40,8 +43,11 @@ void statusMonitor()
 
   if(rcStatus != prevRcStatus)
   {
+#if 0
     Serial.print("RC signal changed: ");
     Serial.println(rcStatus ? "OK" : "MISSING");
+#endif
+    prevRcStatus = rcStatus;
   }
 }
 
@@ -53,19 +59,40 @@ bool timeForNewControlCycle()
 
 void loop()
 {
+  int16_t outR;
+  int16_t outL;
+  int16_t throttleInPercent;
+  int16_t directionInPercent;
+  uint32_t encR;
+  uint32_t encL;
+
+  static uint32_t cumulativeEncR = 0;
+  static uint32_t cumulativeEncL = 0;
+  int32_t cumulativeDiff;
+
   /*only run at 125ms interval*/
   if(timeForNewControlCycle())
   {
-    int16_t outR;
-    int16_t outL;
-    int16_t throttleInPercent;
-    int16_t directionInPercent;
-    uint32_t encR;
-    uint32_t encL;
-
     /*get input data from radio control and encoder*/
     rcr_getData(throttleInPercent, directionInPercent);
     enc_getData(encR, encL);
+
+    cumulativeEncR += encR;
+    cumulativeEncL += encL;
+
+#if 1
+    if(throttleInPercent > 10)
+    {
+      throttleInPercent = 10;
+      directionInPercent = 0;
+    }
+    else
+    {
+      throttleInPercent = directionInPercent = 0; 
+    }
+#endif
+
+
 
     /*prepare output values for motors*/
     ctr_speedControl(outR, outL, throttleInPercent, directionInPercent);
@@ -81,7 +108,26 @@ void loop()
     mot_outputUpdate();
   }
 
+
+  cumulativeDiff = cumulativeEncR - cumulativeEncL;
+
+#if 1
+  Serial.print(cumulativeDiff);
+  Serial.print(",");
+  Serial.print(btm_getBatteryLevelInPercent());
+  Serial.print(",");
+  Serial.print((float)encR / 2.5);
+  Serial.print(",");
+  Serial.print((float)encL / 2.5);
+  Serial.print(",");
+  Serial.print(outR);
+  Serial.print(",");
+  Serial.println(outL);
+#endif
+
+
   statusMonitor();
+  delay(20);
 }
 
 
