@@ -23,7 +23,7 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
 
 
-  Serial.println("cumulativeDiff,encR,encL,outRAfter,outLAfter");
+  Serial.println("encDiff, outRBefore,outLBefore, outRAfter,outLAfter, encR,encL");
 
 
   rcr_initialize();
@@ -54,7 +54,7 @@ void statusMonitor()
 
 bool timeForNewControlCycle()
 {
-  return enc_125msElapsed();
+  return enc_measuringCycleElapsed();
 }
 
 void loop()
@@ -63,24 +63,22 @@ void loop()
   float outL;
   int16_t throttleInPercent;
   int16_t directionInPercent;
-  uint32_t encR;
-  uint32_t encL;
+  float encRpsR;
+  float encRpsL;
 
-  static uint32_t cumulativeEncR = 0;
-  static uint32_t cumulativeEncL = 0;
-  static int32_t cumulativeDiff = 0;
+  int32_t encDiff = 0;
 
   /*only run at 125ms interval*/
   if(timeForNewControlCycle())
   {
     /*get input data from radio control and encoder*/
     rcr_getData(throttleInPercent, directionInPercent);
-    enc_getData(encR, encL);
+    enc_getData(encRpsR, encRpsL, encDiff);
 
-    cumulativeEncR += encR;
-    cumulativeEncL += encL;
+    //cumulativeEncR += encR;
+    //cumulativeEncL += encL;
 
-#if 1
+#if 0
     if(throttleInPercent > 10)
     {
       throttleInPercent = 10;
@@ -97,8 +95,23 @@ void loop()
     /*prepare output values for motors*/
     ctr_speedControl(outR, outL, throttleInPercent, directionInPercent);
 
+#if 1
+if(throttleInPercent)
+{
+  Serial.print(encDiff);
+  Serial.print(",");
+  
+  Serial.print(outR);
+  Serial.print(",");
+  Serial.print(outL);
+  Serial.print(",");
+}
+#endif
+
+
+
     /*adjust motor output values according to the encoder value*/
-    ctr_speedAdjust(outR, outL, encR, encL);
+    ctr_speedAdjust(outR, outL, encRpsR, encRpsL);
 
     /*prepare writing values to motor controller*/
     mot_valueSet(0, outR);
@@ -108,25 +121,26 @@ void loop()
     mot_outputUpdate();
 
 
-    cumulativeDiff = cumulativeEncR - cumulativeEncL;
-
-  }
-
 #if 1
 if(throttleInPercent)
 {
 
-  Serial.print(cumulativeDiff);
-  Serial.print(",");
-  Serial.print((float)encR / 2.5);
-  Serial.print(",");
-  Serial.print((float)encL / 2.5);
-  Serial.print(",");
+//  Serial.print((float)outR*2.5);
   Serial.print(outR);
   Serial.print(",");
-  Serial.println(outL);
+  Serial.print(outL);
+  Serial.print(",");
+  Serial.print(encRpsR/2.5);
+  Serial.print(",");
+  Serial.print(encRpsL/2.5);
+  Serial.print(",");
+  Serial.println(",0,100");
 }
 #endif
+
+
+  }
+
 
 
 

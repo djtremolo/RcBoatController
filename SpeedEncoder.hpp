@@ -4,7 +4,8 @@
 #include "Common.hpp"
 
 void enc_initialize(void);
-void enc_getData(uint32_t &chRight, uint32_t &chLeft);
-bool enc_125msElapsed();
+void enc_getData(float &rpsR, float &rpsL);
+void enc_getData(float &rpsR, float &rpsL, int32_t &diff);  /*diff for debug*/
+bool enc_measuringCycleElapsed();
 
 #endif

@@ -351,7 +351,7 @@ void mot_initialize()
   }
 
   cli();  /*disable*/
-  pwmTimerSetup(40000);
+  pwmTimerSetup(50000);
   sei();  /*enable*/
 }
 

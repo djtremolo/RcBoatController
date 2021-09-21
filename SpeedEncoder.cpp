@@ -13,16 +13,37 @@
 static void isrSpeedSensor0();
 static void isrSpeedSensor1();
 
+void measuringCycleTimerSetup();
+
+
 volatile uint32_t isrSensorTickArray[2];
 volatile uint32_t eighthsOfRevolution[2];
 volatile uint32_t seqNo;   /*incremented each time the RPS values have been updated. Used for synchronizing the control loop.*/
 volatile uint32_t sgTimerCntr = 0;
 
-void enc_getData(uint32_t &chRight, uint32_t &chLeft)
+
+void enc_getData(float &rpsR, float &rpsL)
 {
-  chRight = eighthsOfRevolution[0];
-  chLeft = eighthsOfRevolution[1];
+  /*data is given as floats for future expansion*/
+  rpsR = (float)(eighthsOfRevolution[0] * 5);
+  rpsL = (float)(eighthsOfRevolution[1] * 5);
 }
+
+void enc_getData(float &rpsR, float &rpsL, int32_t &diff)
+{
+  static int32_t cumulativeR = 0;
+  static int32_t cumulativeL = 0;
+
+  cumulativeR += eighthsOfRevolution[0];
+  cumulativeL += eighthsOfRevolution[1];
+
+  diff = (cumulativeR - cumulativeL) / 8;   /*return difference in full revolutions*/
+
+  /*data is given as floats for future expansion*/
+  rpsR = (float)(eighthsOfRevolution[0] * 5);
+  rpsL = (float)(eighthsOfRevolution[1] * 5);
+}
+
 
 ISR(TIMER1_COMPA_vect) 
 {
@@ -47,7 +68,7 @@ ISR(TIMER1_COMPA_vect)
   seqNo++;
 }
 
-bool enc_125msElapsed()
+bool enc_measuringCycleElapsed()
 {
   bool ret = false;
   static uint32_t prevSeqNo = 0;
@@ -58,6 +79,24 @@ bool enc_125msElapsed()
     ret = true;
   }
   return ret;
+}
+
+
+void measuringCycleTimerSetup()
+{
+ // Clear registers
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+
+  // 40 Hz (16000000/((6249+1)*64))
+  OCR1A = 6249;
+  // CTC
+  TCCR1B |= (1 << WGM12);
+  // Prescaler 64
+  TCCR1B |= (1 << CS11) | (1 << CS10);
+  // Output Compare Match A Interrupt Enable
+  TIMSK1 |= (1 << OCIE1A);
 }
 
 
@@ -77,6 +116,8 @@ void enc_initialize(void)
   cli();  /*disable*/
   attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR1), isrSpeedSensor0, CHANGE);
   attachPCINT(digitalPinToPCINT(SS_BIT_SENSOR2), isrSpeedSensor1, CHANGE);
+
+  measuringCycleTimerSetup();
   sei();  /*enable*/
 }
 
