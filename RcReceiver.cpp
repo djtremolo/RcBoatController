@@ -166,9 +166,10 @@ int16_t getSteeringDirection()
   {
     int32_t dir = (int32_t)map(pw, 1110, 2064, -100, 100);
 
-    if(abs(dir) < 5) dir = 0;
-    else if(dir > 100) dir = 100;
-    else if(dir < -100) dir = -100;
+    if(abs(dir) < 5) 
+      dir = 0;
+    else 
+      dir = constrain(dir, -100, 100);
 
     steeringDirection = (int16_t)dir;
   }
@@ -198,9 +199,10 @@ int16_t getThrottlePosition()
       tp = (int32_t)map(pw, 1572, 2088, 0, 100);
     }
 
-    if(abs(tp) < 5) tp = 0;
-    else if(tp > 100) tp = 100;
-    else if(tp < -100) tp = -100;
+    if(abs(tp) < 5) 
+      tp = 0;
+    else
+      tp = constrain(tp, -100, 100);
 
     throttlePosition = (int16_t)tp;
   }
