@@ -31,17 +31,12 @@ void enc_getData(float &rpsR, float &rpsL)
 
 void enc_getData(float &rpsR, float &rpsL, int32_t &diff)
 {
-  static int32_t cumulativeR = 0;
-  static int32_t cumulativeL = 0;
+  uint32_t a = isrSensorTickArray[0];
+  uint32_t b = isrSensorTickArray[1];
 
-  cumulativeR += eighthsOfRevolution[0];
-  cumulativeL += eighthsOfRevolution[1];
+  diff = (a>b ? a-b : b-a) / 8;
 
-  diff = (cumulativeR - cumulativeL) / 8;   /*return difference in full revolutions*/
-
-  /*data is given as floats for future expansion*/
-  rpsR = (float)(eighthsOfRevolution[0] * 5);
-  rpsL = (float)(eighthsOfRevolution[1] * 5);
+  enc_getData(rpsR, rpsL);
 }
 
 

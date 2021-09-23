@@ -235,7 +235,7 @@ void mot_outputUpdate()
     }
 
     int16_t pwmAbs = abs(mv);
-    uint16_t tw = 100;//map(pwmAbs, 0, 100, 100, 40);   /*40kHz ISR -> 1000Hz at highest throttle, 400Hz at lowest*/
+    uint16_t tw = map(pwmAbs, 0, 100, 100, 50);   /*50kHz ISR -> 500Hz at lowest throttle, 1000Hz at highest*/
     uint16_t aw = map(pwmAbs, 0, 100, 0, tw);
 
     switch(drv)
