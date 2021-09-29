@@ -1,8 +1,10 @@
 site_name: RcBoatController
-site_url: https://github.com/djtremolo/RcBoatController
 site_description: Project documentation for RcBoatController
 site_author: djtremolo@gmail.com
 
+repo_url: https://github.com/djtremolo/RcBoatController
+
 docs_dir: 'doc'
+
 nav:
     - Home: README.md
