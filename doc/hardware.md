@@ -14,14 +14,17 @@ The cells are kept together in a DIY holder. I bought the holders from ebay, but
 At first, I used [DRV8871](https://www.ti.com/product/DRV8871)-based H-bridges to run the motors. They almost worked, but the driver chip got overheated and the current limiting protection activated too often, causing the motor to get jumpy and slow down occasionally during run.
 After measuring the current consumption, it became clear that stronger driver circuits are needed. I ended up using [BTS7960](https://www.partco.fi/en/electromechanics/motors/motor-controllersdrivers/19263-bts7960b-modul.html)-based bridges, one per motor. They are too big for this purpose, but the boat benefits from some added middle weight and they fit nicely, so let them be. I have never got the cooling elements to heat up noticeably, so I almost believe they could be run even without the heat sinks in this use case.
 
-<img src="photos/poweroutput.jpg" alt="power output bridges" width="40%"/>
+![power output bridges](photos/poweroutput.jpg)
 
 ## Radio control
 I was told that the original product had a two lever controller, supposed to be used by two hands - one controlling the left side motor, the other one controlling the right side motor. I'm not a big fan of such control, so it was natural to go for a bit more user friendly approach for the replacement.
 I found a controller+receiver kit for RC cars (see [here](https://www.rhs.fi/rc-tarvikkeet-1/radiolaitteet/radio/muut/maxam-e0105-xt-16-2-4ghz-3-kanals-rattradio.html)).
 
-<img src="photos/rhs_controller.jpg" alt="radio controller from rhs.fi" width="20%"/>
-<img src="photos/rhs_receiver.jpg" alt="radio receiver from rhs.fi" width="20%"/>
+![radio controller](photos/rhs_controller.jpg)
+
+![radio receiver](photos/rhs_receiver.jpg)
+
+*note: images owned by the [seller](https://www.rhs.fi/))*
 
 The kit works well and it was easy to interact with. The datasheet didn't tell much, but the output signals connected to an oscilloscope made it clear. Both channels provide a periodic pulse at 60Hz interval. The length of the pulses vary between ~1000us...~2000us, which made it straight forward to convert the pulse lengths to lever percentages.
 
@@ -30,7 +33,7 @@ Being an engineer who enjoys over solved problems, I decided to add speed encode
 
 There was no space or suitable holder for mounting a normal rotary encoder disc, so I decided to create a DIY version of it. There were some [NERF darts](https://www.hasbro.com/common/productimages/fi_FI/CCCE147C5056900B10553FA593C070AD/converted1ffcb02be85a88a948de298296f6b2eaec526f63.jpg) available at my house, so I used one of them. Painted in matte black, glued with four narrow stripes of aluminium foil and sliding it on the axle, I ended up having something that can be used as an encoder. The only thing needed was an optical detector, where a pair of [CNY70's](https://www.vishay.com/docs/83751/cny70.pdf) became handy. One revolution makes the detector to see eight state transitions (dark->lit->dark->lit etc), which can then be counted by the microcontroller and converted to speed. Naturally, this kind of feedback sensor is not aware of direction of movement, but for the given use case, the directionless speed information was considered enough.
 
-<img src="photos/speeddetector.jpg" alt="speed detector CNY70 mounted on a holder plate" width="40%"/>
+![speed detector CNY70 mounted on a holder plate](photos/speeddetector.jpg)
 
 <a href="https://youtu.be/PrkZCHm4Xqk"><img src="photos/preview_speeddetector.jpg" alt="speed detector" width="40%"/></a>
 
@@ -40,8 +43,8 @@ I had some DFRobot Bluno Beetle boards as a leftover from earlier projects. That
 
 The board is shown here:
 
-<img src="photos/dfrobottop.jpg" alt="microcontroller top" width="20%"/>
-<img src="photos/dfrobotbottom.jpg" alt="microcontroller bottom" width="20%"/>
+![microcontroller top](photos/dfrobottop.jpg)
+![microcontroller botttom](photos/dfrobotbottom.jpg)
 
 
 ## Schematics
@@ -50,7 +53,7 @@ The full schematic in PDF format is available [here](https://github.com/djtremol
 ### Power supply
 First of all, the power supply consists of 2S2P li-ion cells and the output voltage is provided in BAT and GND nets:
 
-<img src="schematics/powersupply.png" alt="power supply" width="40%"/>
+![power supply](schematics/powersupply.png)
 
 ### Controller board
 The main controller (Bluno Beetle) is fed with the battery voltage via VIN. Bluno then regulates it to 5V, which is then provided as output for the other boards via the 5V pin.
@@ -68,26 +71,26 @@ The used connections:
 | EncR |D5 | IN | Digital | Right axle encoder feedback signal  |
 | BAT |SDA | IN | Analog | Battery level (internal analog reference 1.1V) |
 
-<img src="schematics/controller.png" alt="main controller" width="40%"/>
+![main controller](schematics/controller.png)
 
 ### Motor driver
 The driver is a full H-bridge and there are two of them - one per motor. The bridge is fed with separate logic and motor power lines (Vcc and BAT with common GND). The two PWM signals are used to control the motor voltage output to achieve variable speed drive.
 
-<img src="schematics/driverbridge.png" alt="driver bridge" width="40%"/>
+![driver bridge](schematics/driverbridge.png)
 
 ### Radio controller interface
 The radio control interface shown here is for visualization only. The pinout in the receiver is actually a 4x3 pin header with Vcc+GND supplied to radio receiver module and Ch1+Ch2 signals provided by it.
 
-<img src="schematics/radiocontrolinterface.png" alt="radio control interface" width="40%"/>
+![radio control interface](schematics/radiocontrolinterface.png)
 
 ### Speed sensor interface
 The speed sensor interface requires Vcc+GND for the emitting LED. In case of pointing the sensor to reflective surface, the EncX signal is pulled low via the included phototransistor. For this to work, there is a pull up resistor enabled at the controller side.
 
-<img src="schematics/encoderinterface.png" alt="speed encoder interface" width="40%"/>
+![speed encoder interface](schematics/encoderinterface.png)
 
 ### Battery monitoring interface
 Finally, the battery voltage is divided to max 1.1V and then fed to A4(SDA) pin of the controller, where an ADC is used to make it readable by the software. Internal 1.1V analog reference is used for the conversion.
 
-<img src="schematics/batterymonitorinterface.png" alt="battery monitor interface" width="40%"/>
+![battery monitor interface](schematics/batterymonitorinterface.png)
 
 [back to main page](README.md)
