@@ -24,7 +24,7 @@ I found a controller+receiver kit for RC cars (see [here](https://www.rhs.fi/rc-
 
 ![radio receiver](photos/rhs_receiver.jpg)
 
-*note: images owned by the [seller](https://www.rhs.fi/))*
+*note: images owned by the [seller](https://www.rhs.fi/)*
 
 The kit works well and it was easy to interact with. The datasheet didn't tell much, but the output signals connected to an oscilloscope made it clear. Both channels provide a periodic pulse at 60Hz interval. The length of the pulses vary between ~1000us...~2000us, which made it straight forward to convert the pulse lengths to lever percentages.
 

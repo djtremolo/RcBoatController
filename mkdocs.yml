@@ -8,3 +8,6 @@ docs_dir: 'doc'
 
 nav:
     - Home: README.md
+    - Overview: overview.md
+    - Hardware and Electronics: hardware.md
+    - Software: software.md
