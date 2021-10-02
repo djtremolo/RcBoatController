@@ -58,7 +58,7 @@ These functions, called in this given order, will then together produce the real
 ## MotorDriver
 The MotorDriver module is responsible of driving the PWM channels needed for the motor H-bridges. There are two signals needed per each motor bridge: the first one for forward and the second one for reverse drive.
 
-The brushed DC motor behaviour with these two signals:
+The brushed DC motor behaviour is controlled using these two signals:
 
 |H-Bridge inputs|2=HIGH|2=LOW|
 |--|--|--|
