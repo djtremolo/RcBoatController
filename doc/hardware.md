@@ -7,8 +7,7 @@ Knowing the desired voltage being ~8V and current consumption being more than 5A
 
 The cells are kept together in a DIY holder. I bought the holders from ebay, but they were meant for relatively low current use, so I modified them with thicker current lines, again hidden behind a layer of hot glue.
 
-<img src="photos/batteryholder.jpg" alt="battery holder 18650 2S2P" width="40%"/>
-
+![battery holder 18650 2S2P](photos/batteryholder.jpg)
 
 ## Power output circuit
 At first, I used [DRV8871](https://www.ti.com/product/DRV8871)-based H-bridges to run the motors. They almost worked, but the driver chip got overheated and the current limiting protection activated too often, causing the motor to get jumpy and slow down occasionally during run.
