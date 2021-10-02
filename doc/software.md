@@ -5,7 +5,7 @@
 ## Build environment
 The software structure is designed to be built with Arduino IDE. During development, version 1.8.13 was used. Use "Arduino UNO" as build target to get the IDE working with Bluno Beetle.
 
-<img src="figures/arduinoIde.png" alt="arduino ide target selection" width="40%"/>
+![arduino ide target selection](figures/arduinoIde.png)
 
 ## External libraries
 As the ATMega328P has only two external input pins, and they are already used by the Radio Receiver, the speed encoder input signals needed something else. Luckily, the AVR family provides the state change interrupt support for most of the GPIO pins. To simplify setting up these IRQs, I used the [PinChangeInterrupt](https://www.arduino.cc/reference/en/libraries/pinchangeinterrupt/) library for them.
@@ -39,11 +39,11 @@ This control loop is run at 25ms interval.
 
 At program start up, the modules are initialized using their *xxx_initialize()* functions:
 
-<img src="figures/programinitialization.jpg" alt="main program initialization" width="40%"/>
+![main program initialization](figures/programinitialization.jpg)
 
 The basic program flow defined in this chapter will then start operating at the main function:
 
-<img src="figures/programflow.jpg" alt="main program flow" width="40%"/>
+![main program flow](figures/programflow.jpg)
 
 ## Controller
 
@@ -73,13 +73,31 @@ The MotorDriver operates independently for both motors, i.e. in the typical usag
 
 The *mot_valueSet()* function sets the power output request value for the given motor. The value is not taken into use immediately. When both motor output values are set, the next call of *mot_outputUpdate()* will then activate the requested values for PWM generation and the new values are taken into use when the PWM cycle of given motor is finished.
 
+MotorDriver uses **Timer2** to generate the PWM base frequency of 50kHz (20us tick).
+
 ## RcReceiver
+The RcReceiver module listens for the periodic pulses coming from the radio receiver module. The pulse widths are measured and converted to *throttle* and *steering* lever percentages. The measuring is performed by sampling the microsecond counter at both edges, storing the rising edge timestamp and calculating the time difference at falling edge. This *pulse* width is then stored into a simple ring buffer (defined as an array of X elements) by ISR. The ISR also stores the measured *cycle* width (supposed to match to the 60Hz expected update frequency).
+
+The pulse width measurements stay at the ring buffer until they are overwritten after X samples.
+
+The processed radio control values are exposed via the *rcr_getData()* function, which is called periodically by the main program. The rcr_readData does not return with the latest values, but it averages the control values over the X recent samples. So, the main program will get a smoothed value, which gives nice and stable input for the motor controller algorithm. As the averaging window is just handful of samples, the reaction time is still fast enough to not feel laggy by the user.
+
+The RcReceiver module also provides a function *rcr_checkRadioStatus()* for monitoring the validity of the radio control signals, based on each channels cycle time stored by the ISR. This function can be polled by the main program to detect any failure in radio control signals. If either channel fails to update in a given time frame, the main program can then optionally indicate the failure or activate a safe operation mode.
 
 ## SpeedEncoder
+As defined in the projects hardware documentation, the motor axles are equipped with non-reflective tubes with four stripes of reflective material. The optical detector then creates rising and falling edges when the reflectiveness changes. Basically this means that one revolution of the axle will give eight signal changes detected by the ATMega pin change interrupts. At each edge interrupt, the ISR increments a pulse counter - each motor axle handled independently.
+
+The SpeedEncoder uses **Timer1** for generating the control cycle ticks at 40Hz (25ms tick). At this interval, the pulse counters updated by the pin change ISRs are compared to their previous values. This means we will get a number of signal changes at each control cycle of 25ms. This makes it straightforward to convert the number of edges to RPM, or more practically to RPS (revolutions per second). The RPS values are then exposed via the *enc_getData()* function, which is polled by the main program at the beginning of each control cycle.
+
+The main program, which would be totally asynchronous by nature, gets synchronized to the control cycle by calling the *enc_measuringCycleElapsed()* function in the main loop. This function returns true when a new cycle has started.
 
 ## BatteryMonitor
+The BatteryMonitor uses an internal ADC to measure the battery voltage. The main program can use the *btm_getBatteryLevelInPercent()* function to help the user to detect low battery state and to drive back to safe place before the battery level drops too much.
 
 ## Common
+The Common module provides some general purpose functions for any other module to use. As an example, there is a function called *com_checkRange()* that can be used to check whether a given value is in certain range. 
+
+The Common module shall not be made dependent on any other module.
 
 
 [back to main page](README.md)
