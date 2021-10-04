@@ -54,6 +54,7 @@ The Controller module provides two interface functions to be used by the main pr
 The *ctr_speedControl()* function calculates the direct output values based on the user input, i.e. the output value pretty much follows the throttle value. This is completely unaware of the actual speed of the axle, it only cares about the requested drive percentage. This would be enough for the simple drive of the boat.
 
 The main rule of the motor control is:
+
 - T = throttle value, in range of [-100%...100%]. Positive means forward, negative means backward.
 - S = steering value, in range of [-100%...100%]. Positive means turning right, negative means turning left.
 - primary motor is driven at the desired speed (Tp)
