@@ -1,4 +1,4 @@
-# RcBoatController Hardware and Electronics
+# Hardware and Electronics
 
 [back to main page](README.md)
 

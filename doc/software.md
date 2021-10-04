@@ -1,4 +1,4 @@
-# RcBoatController Software
+# Software
 
 [back to main page](README.md)
 

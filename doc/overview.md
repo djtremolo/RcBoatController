@@ -1,4 +1,4 @@
-# RcBoatController Overview
+# Overview
 
 [back to main page](README.md)
 
