@@ -21,6 +21,6 @@ The model/manufacturer of motors is not known, but they are pretty normal brushe
 
 ## Test Drive
 
-<a href="https://youtu.be/F3i1ZTXYGnA"><img src="photos/preview_testdrive.jpg" alt="test drive" width="40%"/></a>
+[Link to test drive video on Youtube](https://youtu.be/F3i1ZTXYGnA)
 
 [back to main page](README.md)

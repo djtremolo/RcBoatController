@@ -34,8 +34,7 @@ There was no space or suitable holder for mounting a normal rotary encoder disc,
 
 ![speed detector CNY70 mounted on a holder plate](photos/speeddetector.jpg)
 
-<a href="https://youtu.be/PrkZCHm4Xqk"><img src="photos/preview_speeddetector.jpg" alt="speed detector" width="40%"/></a>
-
+[Video view of the encoder ring on Youtube](https://youtu.be/PrkZCHm4Xqk)
 
 ## Microcontroller board
 I had some DFRobot Bluno Beetle boards as a leftover from earlier projects. That board has the ATMega 328P controller with a decent development board with enough connectivity around it, so I decided to use it for this. Being Arduino Uno compatible, the Arduino tool chain was the easiest way to get started.
