@@ -57,6 +57,7 @@ First of all, the power supply consists of 2S2P li-ion cells and the output volt
 The main controller (Bluno Beetle) is fed with the battery voltage via VIN. Bluno then regulates it to 5V, which is then provided as output for the other boards via the 5V pin.
 
 The used connections:
+
 | Net | Bluno label | Direction | Signal Type | Usage |
 | -- | -- | -- | -- | -- |
 | MotL1 |A0 | OUT | Digital | PWM signal A for left motor driver |
