@@ -29,6 +29,7 @@ The modules are further explained in the following chapters.
 
 ## Main program
 The overall boat speed control follows a periodical scheme, where the basic program flow is:
+
 - read input values (from radio receiver and speed encoder)
 - calculate new output values based on the user request (information from radio receiver)
 - calculate the adjustment factor to make the *requested* and *measured* speed to match (information from speed encoder)
