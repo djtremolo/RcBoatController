@@ -15,6 +15,7 @@ The software consists of the functional modules further defined in the chapter [
 
 ## Modules
 The modules are shown in the following figure, which shows the initialization sequence at start-up. The interface functions of each module are labeled with a three-letter prefix to indicate the module to which they belong to:
+
 | Prefix | Module name | Purpose |
 | -- | -- | -- |
 |mot|MotorDriver|Power output. Takes in the requested left+right motor output values and drives the four PWM channels accordingly.|
@@ -61,8 +62,9 @@ The main rule of the motor control is:
 - the same concept applies also when moving backwards
 
 Then, depending on the steering value, the motor output values are set primary/secondary values accordingly:
-| Steering value | Turn direction | Right motor | Left motor |
-| -- | -- | -- | -- |
+
+|Steering value|Turn direction|Right motor|Left motor|
+|--|--|--|--|
 | negative | left | primary | secondary |
 | positive | right | secondary | primary |
 
