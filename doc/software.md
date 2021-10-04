@@ -49,9 +49,27 @@ The basic program flow defined in this chapter will then start operating at the 
 
 The Controller module provides two interface functions to be used by the main program. 
 
+### ctr_speedControl()
 The *ctr_speedControl()* function calculates the direct output values based on the user input, i.e. the output value pretty much follows the throttle value. This is completely unaware of the actual speed of the axle, it only cares about the requested drive percentage. This would be enough for the simple drive of the boat.
 
-The output values prepared by the *ctr_speedAdjust()* function that is aware of both *requested* and *measured* speed of the motors. The adjustment will then compensate the output value to keep the axles spinning the correct speed regardless of any physical factors that would affect the speed. Naturally, the adjustment cannot make the motor to spin more than 100% of the drive cycle, but the compensation is more visible at the lower speeds. Brushed DC motors in general deliver low torque when being driven with low duty cycle PWM. This problem can be somewhat solved with speed adjustment: when the adjustment expects the motor to be moving, but it is stalled due to low torque, the speed adjustment can raise the speed request and therefore "kickstart" the motor so that it starts moving. After the movement is detected, the speed adjustment automatically lowers the requested speed to avoid it being too fast.
+The main rule of the motor control is:
+- T = throttle value, in range of [-100%...100%]. Positive means forward, negative means backward.
+- S = steering value, in range of [-100%...100%]. Positive means turning right, negative means turning left.
+- primary motor is driven at the desired speed (Tp)
+- secondary motor speed is driven to force the boat to steer. On very aggressive turns, Ts = -Tp.
+- mapping primary/secondary values to left/right motors is dependent on the steering direction, see table below.
+- the same concept applies also when moving backwards
+
+Then, depending on the steering value, the motor output values are set primary/secondary values accordingly:
+| Steering value | Turn direction | Right motor | Left motor |
+| -- | -- | -- | -- |
+| negative | left | primary | secondary |
+| positive | right | secondary | primary |
+
+### ctr_speedAdjust()
+The output values are then adjusted by the *ctr_speedAdjust()* function that is aware of both *requested* and *measured* speed of the motors. The adjustment will compensate the output value to keep the axles spinning at desired speed regardless of any physical factors that would affect the speed. Naturally, the adjustment cannot make the motor to spin more than 100% of the drive cycle, but the compensation is more visible at the lower speeds.
+
+Brushed DC motors in general deliver low torque when being driven with low duty cycle PWM. This problem can be somewhat solved with speed adjustment: when the adjustment expects the motor to be moving, but it is stalled due to low torque, the speed adjustment can raise the speed request and therefore "kickstart" the motor so that it starts moving. After the movement is detected, the speed adjustment automatically lowers the requested speed to avoid it being too fast.
 
 These functions, called in this given order, will then together produce the real requested output value to be written to the motor driver.
 
